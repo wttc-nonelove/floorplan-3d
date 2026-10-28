@@ -1,0 +1,10 @@
+services:
+  floorplan-3d:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: floorplan-3d:latest
+    container_name: floorplan-3d
+    ports:
+      - "8080:80"
+    restart: unless-stopped

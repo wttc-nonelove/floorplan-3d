@@ -266,6 +266,7 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
       <button class="btn chip" data-layer="grid" data-en="Grid">网格</button>
       <button class="btn chip" data-layer="bearing" data-en="Bearing walls">承重墙</button>
       <button class="btn chip on" data-layer="wallSnap" title="拖动家具时贴墙吸附" data-en-title="Snap furniture to walls while dragging" data-en="Wall snap">贴墙吸附</button>
+      <button class="btn chip on" data-layer="align" title="拖动家具时与其他家具对齐" data-en-title="Align to other furniture while dragging" data-en="Align">对齐</button>
     </div>
     <div class="grp only3d">
       <button class="btn chip on" data-cut="2.8" data-en="Full walls">全高墙</button>
@@ -313,6 +314,7 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
       <g id="gLabels" pointer-events="none"></g>
       <g id="gDims" pointer-events="none"></g>
       <g id="gMeasure" pointer-events="none"></g>
+      <g id="gGuides" pointer-events="none"></g>
       <g id="gSel"></g>
     </svg>
     <div id="view3d">
@@ -546,11 +548,52 @@ function load(){
   try { const s = JSON.parse(localStorage.getItem(STORE)); if (s && Array.isArray(s.furniture)) return fixState(s); } catch(e) {}
   return null;
 }
+// 存档 / 导入的数据可能来自旧版本、手改过的 JSON 或别处导出的文件。
+// 这里逐字段兜底：宁可丢掉一个坏字段，也不让一个非法值把后面的渲染整条打断。
 function fixState(s){
-  const d = defaultState();
-  s.rooms = Object.assign(d.rooms, s.rooms || {});
-  s.demolished = s.demolished || []; s.measures = s.measures || [];
-  return s;
+  s = (s && typeof s === 'object') ? s : {};
+  const num = (v, dflt) => Number.isFinite(+v) ? +v : dflt;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const rot = v => ((Math.round(num(v, 0)) % 360) + 360) % 360;
+  const out = {furniture: [], rooms: {}, demolished: [], measures: []};
+
+  // 房间：只保留内置房间，名称与地面材料必须合法
+  ROOMS.forEach(r => { out.rooms[r.id] = {name: r.name, mat: r.mat}; });
+  Object.entries(s.rooms || {}).forEach(([id, st]) => {
+    if (!out.rooms[id] || !st || typeof st !== 'object') return;
+    if (typeof st.name === 'string' && st.name.trim()) out.rooms[id].name = st.name.trim().slice(0, 40);
+    if (typeof st.mat === 'string' && MATS[st.mat]) out.rooms[id].mat = st.mat;
+  });
+
+  // 家具：类型必须是字符串，尺寸/坐标必须有上限，颜色回落到类型默认色
+  const seen = new Set();
+  (Array.isArray(s.furniture) ? s.furniture : []).forEach(f => {
+    if (!f || typeof f !== 'object' || typeof f.type !== 'string' || !f.type) return;
+    let id = typeof f.id === 'string' && f.id ? f.id : uid();
+    if (seen.has(id)) id = uid();
+    seen.add(id);
+    out.furniture.push({
+      id, type: f.type,
+      name: typeof f.name === 'string' && f.name.trim() ? f.name.trim().slice(0, 40) : f.type,
+      cx: clamp(Math.round(num(f.cx, 0)), -50000, 50000),
+      cy: clamp(Math.round(num(f.cy, 0)), -50000, 50000),
+      w: clamp(Math.round(num(f.w, 600)), 50, 20000),
+      d: clamp(Math.round(num(f.d, 600)), 50, 20000),
+      rot: rot(f.rot),
+      color: /^#[0-9a-f]{3,8}$/i.test(f.color || '') ? f.color : typeColor(f.type),
+    });
+  });
+
+  // 拆除记录：只认合法墙体下标，且承重墙不可拆
+  if (Array.isArray(s.demolished)) out.demolished = [...new Set(s.demolished.filter(id =>
+    typeof id === 'string' && /^w\d+$/.test(id) && WALLS[+id.slice(1)] && WALLS[+id.slice(1)][4] !== 'b' && WALLS[+id.slice(1)][4] !== 'e'))];
+
+  // 测量线：两端点必须是数字
+  const okPt = p => p && Number.isFinite(+p.x) && Number.isFinite(+p.y);
+  if (Array.isArray(s.measures)) out.measures = s.measures.filter(m => m && okPt(m.a) && okPt(m.b))
+    .map(m => ({a: {x: +m.a.x, y: +m.a.y}, b: {x: +m.b.x, y: +m.b.y}}));
+
+  return out;
 }
 
 const PX_MM = 25.4 / 96;                       // 1 CSS px = 0.2646 mm
@@ -564,8 +607,8 @@ const svg = $('#plan');
 
 /* ======================= 状态 / 历史 / 存储 ======================= */
 let state = load() || defaultState();
-const ui = {tool:'select', sel:null, mA:null, mCur:null,
-  layers:{dims:true, labels:true, furn:true, grid:false, bearing:false, wallSnap:true}};
+const ui = {tool:'select', sel:null, mA:null, mCur:null, guides:[],
+  layers:{dims:true, labels:true, furn:true, grid:false, bearing:false, wallSnap:true, align:true}};
 let view = {x0:0, y0:0, s:.06};
 const undoStack = [], redoStack = [];
 
@@ -1141,16 +1184,51 @@ function toMM(e){
 
 /* ======================= 吸附 ======================= */
 const grid = () => 10;
+let wallSnapped = {x:false, y:false};          // 本次吸附是否由墙面命中：命中过的轴不再参与家具间对齐
 function snapMove(f, cx, cy){
   let nx = Math.round(cx/grid())*grid(), ny = Math.round(cy/grid())*grid();
+  wallSnapped = {x:false, y:false};
   if (!ui.layers.wallSnap) return [nx, ny];
   const {hw, hh} = aabb(f), tol = 10/view.s;
   let bx = tol, by = tol;
   for (const r of snapRects()){
-    if (!(r[3] < cy-hh-tol || r[1] > cy+hh+tol)) for (const ex of [r[0], r[2]]) for (const c of [ex+hw, ex-hw]) if (Math.abs(c-cx) < bx){ bx = Math.abs(c-cx); nx = c; }
-    if (!(r[2] < cx-hw-tol || r[0] > cx+hw+tol)) for (const ey of [r[1], r[3]]) for (const c of [ey+hh, ey-hh]) if (Math.abs(c-cy) < by){ by = Math.abs(c-cy); ny = c; }
+    if (!(r[3] < cy-hh-tol || r[1] > cy+hh+tol)) for (const ex of [r[0], r[2]]) for (const c of [ex+hw, ex-hw]) if (Math.abs(c-cx) < bx){ bx = Math.abs(c-cx); nx = c; wallSnapped.x = true; }
+    if (!(r[2] < cx-hw-tol || r[0] > cx+hw+tol)) for (const ey of [r[1], r[3]]) for (const c of [ey+hh, ey-hh]) if (Math.abs(c-cy) < by){ by = Math.abs(c-cy); ny = c; wallSnapped.y = true; }
   }
   return [nx, ny];
+}
+
+/* 家具之间的对齐吸附：把当前家具的左 / 中 / 右、上 / 中 / 下，与其他家具的同类参考线比较，
+ * 命中阈值内就在该轴吸附，并返回一条贯穿两者的辅助线。地毯不参与（面积太大，会到处抢吸附）。 */
+const ALIGN_PX = 6;
+function alignSnap(f, cx, cy, skip){
+  if (!ui.layers.align || !ui.layers.furn) return {cx, cy, guides: []};
+  const tol = ALIGN_PX / view.s, a = aabb(f);
+  const sx = [cx - a.hw, cx, cx + a.hw], sy = [cy - a.hh, cy, cy + a.hh];
+  let bx = tol, by = tol, mx = null, my = null;
+  for (const g of state.furniture){
+    if (g.id === f.id || g.type === 'rug') continue;
+    const b = aabb(g), ox = [g.cx - b.hw, g.cx, g.cx + b.hw], oy = [g.cy - b.hh, g.cy, g.cy + b.hh];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++){
+      if (!skip?.x){ const dx = Math.abs(ox[i] - sx[j]); if (dx < bx){ bx = dx; mx = {v:ox[i], j, g, b}; } }
+      if (!skip?.y){ const dy = Math.abs(oy[i] - sy[j]); if (dy < by){ by = dy; my = {v:oy[i], j, g, b}; } }
+    }
+  }
+  const out = {cx, cy, guides: []};
+  if (mx){
+    out.cx = cx + (mx.v - sx[mx.j]);
+    out.guides.push({x1:mx.v, y1:Math.min(cy - a.hh, mx.g.cy - mx.b.hh), x2:mx.v, y2:Math.max(cy + a.hh, mx.g.cy + mx.b.hh)});
+  }
+  if (my){
+    out.cy = cy + (my.v - sy[my.j]);
+    out.guides.push({x1:Math.min(cx - a.hw, my.g.cx - my.b.hw), y1:my.v, x2:Math.max(cx + a.hw, my.g.cx + my.b.hw), y2:my.v});
+  }
+  return out;
+}
+function renderGuides(){
+  const g = $('#gGuides'); if (!g) return;
+  g.innerHTML = (ui.guides || []).map(l => `<line x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}"
+    stroke="#b5653a" stroke-width="1" stroke-dasharray="7 4" opacity=".8" vector-effect="non-scaling-stroke"/>`).join('');
 }
 function snapPoint(p, shift){
   let x = Math.round(p.x/10)*10, y = Math.round(p.y/10)*10;
@@ -1174,6 +1252,7 @@ function pinchInfo(){
 // 结束当前拖动：移动过的家具记入撤销栈
 function endDrag(cancel){
   const d = drag; drag = null; svg.classList.remove('panning');
+  ui.guides = []; renderGuides();
   if (!d) return;
   if (d.kind === 'measure'){
     if (cancel){ ui.mA = ui.mCur = null; renderMeasure(); return; }
@@ -1256,7 +1335,9 @@ svg.addEventListener('pointermove', e => {
   if (!drag.moved && !far) return;             // 轻点家具不应让它抖动一下
   drag.moved = true;
   if (drag.kind === 'move'){
-    [f.cx, f.cy] = snapMove(f, p.x-drag.ox, p.y-drag.oy);
+    const [sx, sy] = snapMove(f, p.x-drag.ox, p.y-drag.oy);
+    const al = alignSnap(f, sx, sy, wallSnapped);
+    f.cx = al.cx; f.cy = al.cy; ui.guides = al.guides;
   } else if (drag.kind === 'rot'){
     let a = Math.atan2(p.y-f.cy, p.x-f.cx)*180/Math.PI + 90;
     f.rot = norm(e.shiftKey ? a : Math.round(a/15)*15);
@@ -1268,7 +1349,7 @@ svg.addEventListener('pointermove', e => {
     const mx = ax + nw/2, my = ay + nd/2;
     f.cx += mx*c - my*s; f.cy += mx*s + my*c; f.w = nw; f.d = nd;
   }
-  renderFurn(); renderSel();
+  renderFurn(); renderSel(); renderGuides();
 });
 
 function onPointerEnd(e){
@@ -1420,12 +1501,26 @@ const TIPS = () => COARSE
 async function setView(m){
   if (m === viewMode || switching) return;
   if (!window.View3D) return toast(tr('3D 引擎仍在加载或加载失败（需要联网加载 three.js）', '3D engine is still loading or failed to load (three.js needs a network connection)'));
+  const prev = viewMode;
   switching = true; document.body.classList.add('busy');
   viewMode = m;
-  if (m === '3d'){ if (ui.tool !== 'select') setTool('select'); ui.mA = null; document.body.classList.add('m3d'); await window.View3D.enter(); }
-  else { document.body.classList.remove('m3d'); await window.View3D.exit(); applyView(); }
-  $('#tip').textContent = TIPS()[m];
-  switching = false; document.body.classList.remove('busy');
+  try {
+    if (m === '3d'){ if (ui.tool !== 'select') setTool('select'); ui.mA = null; document.body.classList.add('m3d'); await window.View3D.enter(); }
+    else { document.body.classList.remove('m3d'); await window.View3D.exit(); applyView(); }
+    $('#tip').textContent = TIPS()[m];
+  } catch(err){
+    // WebGL 建不起来（禁用硬件加速 / 驱动异常）时不能把界面卡在中间态：
+    // 复位视图状态、放掉 busy 锁，让人还能继续用 2D。
+    console.error('[3D]', err);
+    viewMode = prev;
+    document.body.classList.toggle('m3d', prev === '3d');
+    $('#stage').classList.toggle('is3d', prev === '3d');
+    if (prev !== '3d') applyView();
+    try { await window.View3D.exit(); } catch(e) {}
+    toast(tr('3D 场景启动失败：浏览器未能创建 WebGL 上下文，已停留在 2D 平面', '3D failed: no WebGL context available — staying in 2D'));
+  } finally {
+    switching = false; document.body.classList.remove('busy');
+  }
 }
 document.querySelectorAll('.menu-pop .btn').forEach(b => b.addEventListener('click', () => b.closest('details').open = false));
 document.querySelectorAll('#viewSeg .btn').forEach(b => b.onclick = () => setView(b.dataset.view));
@@ -1434,6 +1529,7 @@ document.querySelectorAll('#tools .btn').forEach(b => b.onclick = () => setTool(
 document.querySelectorAll('#layers .btn').forEach(b => b.onclick = () => {
   const k = b.dataset.layer; ui.layers[k] = !ui.layers[k]; b.classList.toggle('on', ui.layers[k]);
   if (k === 'dims') $('#gDims').setAttribute('display', ui.layers.dims ? 'inline' : 'none');
+  else if (k === 'align'){ ui.guides = []; renderGuides(); }
   else if (k !== 'wallSnap') renderAll();
 });
 $('#zoomIn').onclick = () => zoomCenter(1.25);
@@ -1476,8 +1572,14 @@ $('#importJson').onclick = () => $('#fileIn').click();
 $('#fileIn').onchange = e => {
   const file = e.target.files[0]; if (!file) return;
   file.text().then(txt => {
-    try { const s = JSON.parse(txt); if (!Array.isArray(s.furniture)) throw 0; const b = snap(); state = fixState(s); ui.sel = null; commit(b); renderAll(); toast(tr('方案已导入', 'Plan imported')); }
-    catch(err){ toast(tr('文件格式不正确', 'Invalid file format')); }
+    try {
+      const raw = JSON.parse(txt);
+      if (!raw || typeof raw !== 'object' || !Array.isArray(raw.furniture)) throw new Error('shape');
+      const b = snap(); state = fixState(raw); ui.sel = null; ui.mA = ui.mCur = null; commit(b); renderAll();
+      toast(tr(`方案已导入：${state.furniture.length} 件家具`, `Plan imported: ${state.furniture.length} items`));
+    } catch(err){
+      toast(tr('文件格式不正确，请选择本工具导出的 JSON', 'Invalid file — pick a JSON exported by this tool'));
+    }
   });
   e.target.value = '';
 };
@@ -1534,7 +1636,7 @@ const doors = [], keys = {};
 
 /* ======================= 初始化 ======================= */
 function init(){
-  if (inited) return; inited = true;
+  if (inited) return;
   renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(SW(), SH());
@@ -1625,6 +1727,7 @@ function init(){
     camera.aspect = SW()/SH(); camera.updateProjectionMatrix();
   }).observe(stage);
   bindUI();
+  inited = true;          // 全部建完才算初始化成功，中途抛错时下次还能重试
 }
 
 /* ======================= 材质 ======================= */
