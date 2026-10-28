@@ -1622,12 +1622,24 @@ function addOpening(p){
   if (a1 > end - 100){ a1 = end - 100; a0 = a1 - len; }
   if (a1 - a0 < 300) return toast(tr('这面墙太短，放不下洞口', 'Wall too short for an opening'));
   const rect = horiz ? [a0, w[1], a1, w[3]] : [w[0], a0, w[2], a1];
+  // 把宿主墙按洞口断开：默认户型的墙本来就是按门窗分段画的，3D 里才不会把窗埋进墙体
+  const wi = hit.i, w0 = w;
   mutate(() => {
-    const pl = state.plan;
+    const pl = state.plan, parts = [];
+    if (horiz){
+      if (a0 - w0[0] > 20) parts.push([w0[0], w0[1], a0, w0[3], w0[4]]);
+      if (w0[2] - a1 > 20) parts.push([a1, w0[1], w0[2], w0[3], w0[4]]);
+    } else {
+      if (a0 - w0[1] > 20) parts.push([w0[0], w0[1], w0[2], a0, w0[4]]);
+      if (w0[3] - a1 > 20) parts.push([w0[0], a1, w0[2], w0[3], w0[4]]);
+    }
+    pl.walls.splice(wi, 1, ...parts);
     if (planOpt.open === 'door') pl.doors.push(makeDoor(rect, doorSign(rect)));
     else if (planOpt.open === 'slide') pl.slides.push({rect, v:!horiz});
     else pl.wins.push([...rect, planOpt.open]);
-    pl.custom = true; syncPlan();
+    pl.custom = true;
+    state.demolished = [];             // 墙体下标已变
+    syncPlan();
   });
 }
 function eraseAt(target){
@@ -2906,7 +2918,8 @@ function buildArch(){
     colliders.push([wx(w[0]), wz(w[1]), wx(w[2]), wz(w[3])]);
   });
   // 门洞、飘窗洞口上方过梁
-  [...DOORS.map(d => [d.rect, 2.1]), ...SLIDES.map(s => [s.rect, s.v ? 2.4 : 2.1]), [[10270,800,10510,2600], 2.4], [[10270,4260,10510,5740], 2.4]]
+  [...DOORS.map(d => [d.rect, 2.1]), ...SLIDES.map(s => [s.rect, s.v ? 2.4 : 2.1]),
+   ...(state.plan.custom ? [] : [[[10270,800,10510,2600], 2.4], [[10270,4260,10510,5740], 2.4]])]
     .forEach(([r, h]) => { if (top > h) wallBox(r, h, top); });
   WINS.forEach(r => {
     const kind = r[4] || 'win';
