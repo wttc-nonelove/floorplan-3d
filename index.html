@@ -323,9 +323,12 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
         <button class="btn" id="exportPng" data-en="Export image">导出图片</button>
         <button class="btn" id="exportJson" data-en="Export plan JSON">导出方案 JSON</button>
         <button class="btn" id="importJson" data-en="Import plan">导入方案</button>
+        <button class="btn" id="exportAll" data-en="Export all plans">导出全部方案</button>
+        <button class="btn" id="importAll" data-en="Import plan bundle">导入方案包</button>
         <button class="btn danger" id="reset" data-en="Reset to default">重置为默认方案</button>
       </div></details>
     <input type="file" id="fileIn" accept=".json,application/json" hidden>
+    <input type="file" id="fileAll" accept=".json,application/json" hidden>
   </header>
 
   <aside class="lib">
@@ -381,6 +384,7 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
   <div class="modal-head"><h3 data-en="Plans">方案</h3><button class="btn" id="planClose" title="关闭">✕</button></div>
   <div class="modal-body"></div>
   <div class="modal-foot">
+    <span id="planUsage" style="margin-right:auto;color:var(--muted);font-size:12px"></span>
     <button class="btn" id="planBlank" data-en="New blank">新建空白</button>
     <button class="btn" id="planNew" data-en="Duplicate current">复制当前为新方案</button>
     <button class="btn primary" id="planDone" data-en="Done">完成</button>
@@ -609,25 +613,43 @@ function defaultState(){
   return {plan, furniture:defaultFurniture(), rooms, demolished:[], measures:[]};
 }
 
-const STORE = 'huxing-design-v1';        // 旧版「单方案」存档，仅用于迁移
-const PLANS = 'huxing-plans-v1';         // 多方案存档
+const STORE = 'huxing-design-v1';          // 旧版「单方案」存档，仅用于迁移
+const PLANS = 'huxing-plans-v1';           // 索引：{ current, list:[{id,name,updatedAt}] }
+const PLAN_KEY = id => 'huxing-plan-' + id; // 每个方案单独一个键，保存时只写当前方案
+let planStates = {};                       // id → state，全部常驻内存
+let planStore = loadPlanStore();
 function load(){
   try { const s = JSON.parse(localStorage.getItem(STORE)); if (s && Array.isArray(s.furniture)) return fixState(s); } catch(e) {}
   return null;
 }
-let planStore = loadPlanStore();
 function currentPlan(){ return planStore.list.find(p => p.id === planStore.current) || planStore.list[0]; }
+function stateOf(id){ return planStates[id]; }
 function loadPlanStore(){
-  try {
-    const raw = JSON.parse(localStorage.getItem(PLANS));
-    if (raw && Array.isArray(raw.list) && raw.list.length){
-      raw.list.forEach(p => { p.state = fixState(p.state); });
-      if (!raw.list.some(p => p.id === raw.current)) raw.current = raw.list[0].id;
-      return raw;
-    }
-  } catch(e) {}
+  let idx = null;
+  try { idx = JSON.parse(localStorage.getItem(PLANS)); } catch(e) {}
+  let migrate = false;
+  if (idx && Array.isArray(idx.list) && idx.list.length){
+    idx.list.forEach(p => {
+      let st = p.state;                                   // 旧版把内容直接存在索引里
+      if (!st){ try { st = JSON.parse(localStorage.getItem(PLAN_KEY(p.id))); } catch(e) {} }
+      planStates[p.id] = fixState(st || defaultState());
+      if (p.state){ delete p.state; migrate = true; }
+    });
+    if (!idx.list.some(p => p.id === idx.current)) idx.current = idx.list[0].id;
+    if (migrate) setTimeout(persistAll, 0);
+    return {current:idx.current, list:idx.list.map(p => ({id:p.id, name:p.name, updatedAt:p.updatedAt}))};
+  }
   const legacy = load();
-  return {current:'p1', list:[{id:'p1', name:tr('方案 1', 'Plan 1'), state:legacy || defaultState(), updatedAt:Date.now()}]};
+  const id = 'p1';
+  planStates[id] = fixState(legacy || defaultState());
+  return {current:id, list:[{id, name:tr('方案 1', 'Plan 1'), updatedAt:Date.now()}]};
+}
+function indexOnly(){ return {current:planStore.current, list:planStore.list.map(p => ({id:p.id, name:p.name, updatedAt:p.updatedAt}))}; }
+function persistAll(){
+  try {
+    planStore.list.forEach(p => { if (planStates[p.id]) localStorage.setItem(PLAN_KEY(p.id), JSON.stringify(planStates[p.id])); });
+    localStorage.setItem(PLANS, JSON.stringify(indexOnly()));
+  } catch(e) {}
 }
 // 存档 / 导入的数据可能来自旧版本、手改过的 JSON 或别处导出的文件。
 // 这里逐字段兜底：宁可丢掉一个坏字段，也不让一个非法值把后面的渲染整条打断。
@@ -761,30 +783,53 @@ const svg = $('#plan');
 let state;
 // 换方案 / 撤销 / 导入统一走这里：保证 WALLS、ROOMS 等引用始终跟着 state.plan
 function applyState(next){ state = next; syncPlan(); }
-applyState(JSON.parse(JSON.stringify(currentPlan().state)));
+applyState(JSON.parse(JSON.stringify(planStates[currentPlan().id])));
 const ui = {tool:'select', sel:null, mA:null, mCur:null, guides:[], planEdit:false, ptool:'select', pdrag:null, pstart:null, pprev:null,
   layers:{dims:true, labels:true, furn:true, grid:false, bearing:false, wallSnap:true, align:true}};
 let view = {x0:0, y0:0, s:.06};
 const undoStack = [], redoStack = [];
 
-function save(){
-  const p = currentPlan();
-  if (p){ p.state = state; p.updatedAt = Date.now(); }
-  try { localStorage.setItem(PLANS, JSON.stringify(planStore)); }
-  catch(e){ toast(tr('保存失败：浏览器本地存储已满，请删除不用的方案', 'Save failed: local storage is full — delete an unused plan')); }
+let saveT = 0;
+// 只把「当前方案」写盘，并做 250ms 防抖：拖动家具时不会每次都序列化全部方案
+function save(now){
+  const p = currentPlan(); if (!p) return;
+  p.updatedAt = Date.now();
+  planStates[p.id] = state;
+  if (now) flushSave();
+  else { clearTimeout(saveT); saveT = setTimeout(flushSave, 250); }
 }
+function flushSave(){
+  clearTimeout(saveT); saveT = 0;
+  const p = currentPlan(); if (!p) return;
+  try {
+    localStorage.setItem(PLAN_KEY(p.id), JSON.stringify(state));
+    localStorage.setItem(PLANS, JSON.stringify(indexOnly()));
+  } catch(e){
+    toast(tr('保存失败：浏览器本地存储已满，请删除不用的方案或导出备份', 'Save failed: local storage is full — delete a plan or export a backup'));
+  }
+}
+addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave(); });
 const snap = () => JSON.stringify(state);
 
 /* ======================= 多方案 ======================= */
-function planStats(st){
+function planStats(id){
+  const st = planStates[id] || {plan:{rooms:[]}, furniture:[]};
   const rooms = (st.plan && st.plan.rooms) || [], counted = rooms.filter(r => r.counted !== false);
   return {rooms: counted.length, furniture: (st.furniture || []).length, area: counted.reduce((a, r) => a + area(r.poly), 0)};
+}
+// 本地占用估算：方案内容 + 名称 + 索引开销
+function storageUsed(){
+  let n = 0;
+  try {
+    planStore.list.forEach(p => { const v = localStorage.getItem(PLAN_KEY(p.id)); n += (v ? v.length : 0) + (p.name || '').length * 2 + 80; });
+  } catch(e) {}
+  return n;
 }
 function openPlans(){ renderPlans(); $('#planModal').classList.add('show'); }
 function closePlans(){ $('#planModal').classList.remove('show'); }
 function renderPlans(){
   $('#planModal .modal-body').innerHTML = planStore.list.map(p => {
-    const st = planStats(p.state), on = p.id === planStore.current, t = new Date(p.updatedAt || Date.now());
+    const st = planStats(p.id), on = p.id === planStore.current, t = new Date(p.updatedAt || Date.now());
     const when = `${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
     return `<div class="plan-row ${on ? 'on' : ''}" data-id="${p.id}">
       <div class="meta"><b>${esc(p.name)}${on ? ' · ' + tr('当前', 'current') : ''}</b>
@@ -793,6 +838,8 @@ function renderPlans(){
         <button class="btn" data-act="rename">${tr('改名', 'Rename')}</button>
         <button class="btn danger" data-act="del">${tr('删除', 'Delete')}</button></div></div>`;
   }).join('');
+  const used = storageUsed();
+  $('#planUsage').textContent = `${tr('本地占用', 'Local storage')} ≈ ${used > 1048576 ? (used/1048576).toFixed(1) + ' MB' : Math.round(used/1024) + ' KB'}`;
   $('#planModal .modal-body').querySelectorAll('.plan-row').forEach(row => {
     row.onclick = e => {
       const act = e.target.closest('[data-act]')?.dataset.act;
@@ -808,48 +855,51 @@ function renderPlans(){
 function activatePlan(id, quiet){
   const p = planStore.list.find(x => x.id === id); if (!p) return;
   planStore.current = id;
-  applyState(JSON.parse(JSON.stringify(p.state)));
+  applyState(JSON.parse(JSON.stringify(planStates[id])));
   undoStack.length = 0; redoStack.length = 0;
   ui.sel = null; ui.guides = []; ui.mA = ui.mCur = null;
-  save(); renderAll(); fitView();
+  save(true); renderAll(); fitView();
   if (!quiet) toast(tr(`已切换到「${p.name}」`, `Switched to "${p.name}"`));
 }
 function switchPlan(id){
   if (id === planStore.current) return closePlans();
-  save();                                   // 先保存当前方案
+  save(true);                               // 先把当前方案落盘，再切换
   activatePlan(id); closePlans();
 }
 function copyPlan(id){
   const p = planStore.list.find(x => x.id === id); if (!p) return;
-  if (id === planStore.current) save();
+  if (id === planStore.current) save(true);
   const nid = 'p' + Date.now().toString(36);
-  planStore.list.push({id:nid, name:p.name + tr(' 副本', ' copy'), state:JSON.parse(JSON.stringify(p.state)), updatedAt:Date.now()});
-  save(); renderPlans();
+  planStates[nid] = JSON.parse(JSON.stringify(planStates[id]));      // 深拷贝，避免两个方案共享引用
+  planStore.list.push({id:nid, name:p.name + tr(' 副本', ' copy'), updatedAt:Date.now()});
+  persistAll(); renderPlans();
 }
 function renamePlan(id){
   const p = planStore.list.find(x => x.id === id); if (!p) return;
   const name = prompt(tr('方案名称', 'Plan name'), p.name);
   if (name === null) return;
   const v = name.trim().slice(0, 30); if (!v) return;
-  p.name = v; save(); renderPlans();
+  p.name = v; persistAll(); renderPlans();
 }
 function deletePlan(id){
   if (planStore.list.length <= 1) return toast(tr('至少保留一个方案', 'Keep at least one plan'));
   const p = planStore.list.find(x => x.id === id); if (!p) return;
   if (!confirm(tr(`删除方案「${p.name}」？此操作不可撤销。`, `Delete "${p.name}"? This cannot be undone.`))) return;
   planStore.list.splice(planStore.list.indexOf(p), 1);
+  delete planStates[id];
+  try { localStorage.removeItem(PLAN_KEY(id)); } catch(e) {}
   if (planStore.current === id) activatePlan(planStore.list[0].id, true);
-  else save();
-  renderPlans();
+  persistAll(); renderPlans();
 }
 function newPlan(blank){
-  save();
+  save(true);
   const id = 'p' + Date.now().toString(36);
   const name = (blank ? tr('空白方案', 'Blank') : tr('方案', 'Plan')) + ' ' + (planStore.list.length + 1);
   const st = blank
     ? fixState({plan:{custom:true, walls:[], wins:[], doors:[], slides:[], rooms:[]}, furniture:[]})
     : JSON.parse(JSON.stringify(state));
-  planStore.list.push({id, name, state:st, updatedAt:Date.now()});
+  planStates[id] = st;
+  planStore.list.push({id, name, updatedAt:Date.now()});
   activatePlan(id, true); renderPlans();
   toast(tr(`已新建「${name}」`, `Created "${name}"`));
 }
@@ -1148,6 +1198,10 @@ function renderSel(){
       s += `<text x="${f.cx}" y="${f.cy+hh+24*k}" font-size="${12*k}" text-anchor="middle" fill="#b5653a" font-weight="600" pointer-events="none"
         stroke="#fff" stroke-width="${3*k}" paint-order="stroke">${f.w} × ${f.d}</text>`;
     }
+  } else if (ui.sel?.kind === 'open'){
+    const o = openingAt(ui.sel.type, ui.sel.index);
+    if (o){ const [x0, y0, x1, y1] = o.rect;
+      s += `<rect x="${x0-30}" y="${y0-30}" width="${x1-x0+60}" height="${y1-y0+60}" fill="rgba(181,101,58,.10)" stroke="#b5653a" stroke-width="1.5" stroke-dasharray="6 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`; }
   } else if (ui.sel?.kind === 'room'){
     const r = ROOMS.find(r => r.id === ui.sel.id);
     s += `<polygon points="${r.poly.map(p=>p.join(',')).join(' ')}" fill="rgba(181,101,58,.08)" stroke="#b5653a" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
@@ -1173,6 +1227,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 function renderPanel(){
   renderFab();
   const p = $('#panel');
+  if (ui.planEdit && ui.sel?.kind === 'open'){ p.innerHTML = openPanel(); bindOpenPanel(); return; }
   if (ui.planEdit){ p.innerHTML = planPanel(); bindPlanPanel(); return; }
   if (ui.sel?.kind === 'furn'){ const f = getF(ui.sel.id); if (f){ p.innerHTML = furnPanel(f); bindFurnPanel(f); return; } }
   if (ui.sel?.kind === 'room'){ p.innerHTML = roomPanel(ROOMS.find(r => r.id === ui.sel.id)); bindRoomPanel(); return; }
@@ -1240,7 +1295,7 @@ function bindOverview(){
 // 底部浮动工具条：触屏没有键盘，旋转 / 复制 / 删除都放在这里
 function renderFab(){
   const fab = $('#fab'), f = ui.sel?.kind === 'furn' && getF(ui.sel.id), r = ui.sel?.kind === 'room' && ROOMS.find(r => r.id === ui.sel.id);
-  if (!f && !r){ fab.classList.remove('show'); return; }
+  if (ui.planEdit || (!f && !r)){ fab.classList.remove('show'); return; }
   fab.innerHTML = f
     ? `<span class="name">${esc(nm(f.name))}</span><button class="btn" data-a="rotL">↺</button><button class="btn" data-a="rotR">↻ ${tr('旋转','Rotate')}</button>
        <button class="btn" data-a="dup">${tr('复制','Duplicate')}</button><button class="btn danger" data-a="del">${tr('删除','Delete')}</button><span class="sep"></span>
@@ -1497,7 +1552,7 @@ function snapPoint(p, shift){
 /* ======================= 户型编辑（墙体 / 门窗 / 房间） ======================= */
 const planOpt = {thick:240, type:'n', open:'win', openW:1500};
 const PTIPS = () => ({
-  select: '',
+  select: tr('点击窗或门可改类型 / 宽度 / 门向，点空白处取消选择', 'Click a window or door to edit type, width or swing'),
   wall: tr('在平面上拖动绘制墙体 · 自动吸附已有墙的边与中线 · Esc / 点「完成」退出', 'Drag to draw a wall · snaps to existing wall edges · Esc to exit'),
   open: tr('点击墙体开洞，洞口类型与宽度在右侧设置', 'Click a wall to insert an opening — type and width are set on the right'),
   room: tr('拖出矩形定义房间，房间可改名、换地面材料', 'Drag a rectangle to define a room'),
@@ -1571,7 +1626,17 @@ function doorSign(rect){
   return a && !b ? 1 : (!a && b ? -1 : 1);
 }
 function planDown(e){
-  const p = toMM(e);
+  const p = toMM(e), t = e.target;
+  if (ui.ptool === 'select'){
+    const el = t.closest && t.closest('[data-win],[data-door],[data-slide]');
+    if (el){
+      const ds = el.dataset;
+      if (ds.win !== undefined) select({kind:'open', type:'win', index:+ds.win});
+      else if (ds.door !== undefined) select({kind:'open', type:'door', index:+ds.door});
+      else select({kind:'open', type:'slide', index:+ds.slide});
+    } else select(null);
+    return;
+  }
   if (ui.ptool === 'wall' || ui.ptool === 'room'){
     ui.pstart = snapDraw(p); ui.pprev = null;
     ui.pdrag = {id:e.pointerId, sx:e.clientX, sy:e.clientY, moved:false};
@@ -1614,6 +1679,10 @@ function addOpening(p){
   const hit = wallAt(p);
   if (!hit) return toast(tr('请点在墙体上', 'Click on a wall'));
   const w = hit.w, horiz = (w[2] - w[0]) >= (w[3] - w[1]);
+  // 与「拆改墙体」保持同一套规则：承重墙不允许开门洞（窗洞属于常规做法，允许但要提示加过梁）
+  const isDoor = planOpt.open === 'door' || planOpt.open === 'slide';
+  if (w[4] === 'b' && isDoor)
+    return toast(tr('承重墙不能开门洞，请先用普通墙分隔或换位置', 'Load-bearing walls cannot take doors — use a partition wall instead'));
   const start = horiz ? w[0] : w[1], end = horiz ? w[2] : w[3];
   const len = Math.max(400, Math.min(planOpt.openW, end - start - 200));
   const c = horiz ? p.x : p.y;
@@ -1623,7 +1692,7 @@ function addOpening(p){
   if (a1 - a0 < 300) return toast(tr('这面墙太短，放不下洞口', 'Wall too short for an opening'));
   const rect = horiz ? [a0, w[1], a1, w[3]] : [w[0], a0, w[2], a1];
   // 把宿主墙按洞口断开：默认户型的墙本来就是按门窗分段画的，3D 里才不会把窗埋进墙体
-  const wi = hit.i, w0 = w;
+  const wi = hit.i, w0 = w, hadDem = state.demolished.length > 0;
   mutate(() => {
     const pl = state.plan, parts = [];
     if (horiz){
@@ -1641,6 +1710,10 @@ function addOpening(p){
     state.demolished = [];             // 墙体下标已变
     syncPlan();
   });
+  const kind = {win:tr('窗','window'), floor:tr('落地窗','floor window'), bay:tr('飘窗','bay window'), door:tr('门','door'), slide:tr('推拉门','sliding door')}[planOpt.open];
+  toast(tr(
+    `已插入${kind}${w[4] === 'b' ? '（承重墙开窗需加过梁）' : ''}${hadDem ? '；墙体已重新分段，拆除标记已清除' : ''}`,
+    `Inserted ${kind}${w[4] === 'b' ? ' (lintel needed on a load-bearing wall)' : ''}${hadDem ? '; walls were re-segmented, removal marks cleared' : ''}`));
 }
 function eraseAt(target){
   const el = target.closest && target.closest('[data-wall],[data-win],[data-door],[data-slide],[data-room]');
@@ -1679,6 +1752,125 @@ function eraseAt(target){
     });
   }
 }
+
+/* ---- 洞口选择与再编辑（改类型 / 改宽度 / 翻转门向 / 删除） ---- */
+function openingAt(type, i){
+  const pl = state.plan;
+  if (type === 'win'){ const w = pl.wins[i]; return w ? {rect:[w[0], w[1], w[2], w[3]], kind:w[4] || 'win'} : null; }
+  if (type === 'door'){ const d = pl.doors[i]; return d ? {rect:[...d.rect], kind:'door', door:d} : null; }
+  const sl = pl.slides[i]; return sl ? {rect:[...sl.rect], kind:'slide'} : null;
+}
+const openTypeOf = kind => kind === 'door' ? 'door' : kind === 'slide' ? 'slide' : 'win';
+// 与洞口同一条墙带、且内边正好贴着洞口两端的墙体
+function bandWalls(rect, horiz){
+  const [x0, y0, x1, y1] = rect;
+  return state.plan.walls.filter(w => horiz
+    ? (Math.abs(w[1] - y0) < 2 && Math.abs(w[3] - y1) < 2)
+    : (Math.abs(w[0] - x0) < 2 && Math.abs(w[2] - x1) < 2));
+}
+function setOpenWidth(W){
+  if (ui.sel?.kind !== 'open') return;
+  const {type, index} = ui.sel, o = openingAt(type, index); if (!o) return;
+  const rect = o.rect, horiz = (rect[2] - rect[0]) >= (rect[3] - rect[1]);
+  const c = horiz ? (rect[0] + rect[2])/2 : (rect[1] + rect[3])/2;
+  W = Math.max(400, Math.min(6000, Math.round(W)));
+  let a0 = Math.round((c - W/2)/10)*10, a1 = a0 + W;
+  const walls = bandWalls(rect, horiz);
+  let lo = -Infinity, hi = Infinity;
+  walls.forEach(w => {
+    // 可用范围是邻墙的「外端」：左邻墙能缩到它的起点，右邻墙能缩到它的终点
+    if (horiz){ if (w[2] <= rect[0] + 1) lo = Math.max(lo, w[0]); if (w[0] >= rect[2] - 1) hi = Math.min(hi, w[2]); }
+    else { if (w[3] <= rect[1] + 1) lo = Math.max(lo, w[1]); if (w[1] >= rect[3] - 1) hi = Math.min(hi, w[3]); }
+  });
+  if (a1 > hi){ a1 = hi; a0 = a1 - W; }
+  if (a0 < lo){ a0 = lo; a1 = Math.min(hi, a0 + W); }
+  if (a1 - a0 < 300) return toast(tr('这面墙不够长，放不下这么宽的洞口', 'The wall is too short for that width'));
+  mutate(() => {
+    const pl = state.plan;
+    // 邻墙内边跟着移动，洞口两侧才不会留缝
+    walls.forEach(w => {
+      if (horiz){ if (Math.abs(w[2] - rect[0]) < 2) w[2] = a0; if (Math.abs(w[0] - rect[2]) < 2) w[0] = a1; }
+      else { if (Math.abs(w[3] - rect[1]) < 2) w[3] = a0; if (Math.abs(w[1] - rect[3]) < 2) w[1] = a1; }
+    });
+    const nr = horiz ? [a0, rect[1], a1, rect[3]] : [rect[0], a0, rect[2], a1];
+    if (type === 'win') pl.wins[index] = [...nr, (pl.wins[index][4] || 'win')];
+    else if (type === 'door'){
+      const d = pl.doors[index], sign = d.o[0] ? Math.sign(d.o[0]) : Math.sign(d.o[1]);
+      const nd = makeDoor(nr, sign); nd.name = d.name; nd.entry = d.entry;
+      pl.doors[index] = nd;
+    } else pl.slides[index] = {rect:nr, v:!horiz};
+    // 缩到只剩一条线的邻墙直接移除，免得留下零宽墙体
+    pl.walls = pl.walls.filter(w => (w[2] - w[0]) >= 20 && (w[3] - w[1]) >= 20);
+    pl.custom = true; syncPlan();
+  });
+}
+function setOpenKind(kind){
+  if (ui.sel?.kind !== 'open') return;
+  const {type, index} = ui.sel, o = openingAt(type, index); if (!o) return;
+  if (openTypeOf(kind) === type) return;
+  const rect = o.rect, horiz = (rect[2] - rect[0]) >= (rect[3] - rect[1]);
+  const door = type === 'door' ? state.plan.doors[index] : null;
+  mutate(() => {
+    const pl = state.plan;
+    if (type === 'win') pl.wins.splice(index, 1);
+    else if (type === 'door') pl.doors.splice(index, 1);
+    else pl.slides.splice(index, 1);
+    if (kind === 'door'){ const nd = makeDoor(rect, doorSign(rect)); if (door) nd.name = door.name; pl.doors.push(nd); }
+    else if (kind === 'slide') pl.slides.push({rect, v:!horiz});
+    else pl.wins.push([...rect, kind]);
+    pl.custom = true; syncPlan();
+  });
+  const nt = openTypeOf(kind);
+  const arr = nt === 'win' ? state.plan.wins : nt === 'door' ? state.plan.doors : state.plan.slides;
+  ui.sel = {kind:'open', type:nt, index:arr.length - 1};
+  renderSel(); renderPanel();
+}
+function flipDoor(){
+  if (ui.sel?.kind !== 'open' || ui.sel.type !== 'door') return;
+  mutate(() => { const d = state.plan.doors[ui.sel.index]; if (d) d.o = [-d.o[0], -d.o[1]]; });
+}
+function removeOpening(){
+  if (ui.sel?.kind !== 'open') return;
+  const {type, index} = ui.sel;
+  mutate(() => {
+    const pl = state.plan;
+    if (type === 'win') pl.wins.splice(index, 1);
+    else if (type === 'door') pl.doors.splice(index, 1);
+    else pl.slides.splice(index, 1);
+    pl.custom = true; syncPlan();
+  });
+  ui.sel = null; renderSel(); renderPanel();
+}
+function openPanel(){
+  const {type, index} = ui.sel, o = openingAt(type, index);
+  if (!o) return planPanel();
+  const [x0, y0, x1, y1] = o.rect, horiz = (x1 - x0) >= (y1 - y0), W = horiz ? x1 - x0 : y1 - y0;
+  const kind = type === 'win' ? (o.kind || 'win') : type;
+  const opt = (v, l) => `<option value="${v}" ${kind === v ? 'selected' : ''}>${l}</option>`;
+  return `<section><h3>${tr('洞口','Opening')} <small>${type === 'win' ? tr('窗','window') : type === 'door' ? tr('门','door') : tr('推拉门','sliding door')}</small></h3>
+    <div class="form">
+      <label class="full">${tr('类型','Type')}<select id="oKind">
+        ${opt('win', tr('普通窗','Window'))}${opt('floor', tr('落地窗','Floor window'))}${opt('bay', tr('飘窗','Bay window'))}
+        ${opt('door', tr('平开门','Door'))}${opt('slide', tr('推拉门','Sliding door'))}</select></label>
+      <label class="full">${tr('宽度','Width')} (mm)<input id="oW" type="number" min="400" max="6000" step="50" value="${Math.round(W)}"></label>
+    </div>
+    <div class="actions">
+      ${type === 'door' ? `<button class="btn" id="oFlip">${tr('翻转开向','Flip swing')}</button>` : ''}
+      <button class="btn danger" id="oDel">${tr('删除洞口','Delete')}</button>
+      <button class="btn" id="oBack">${tr('← 返回','← Back')}</button>
+    </div></section>
+    <section class="muted" style="font-size:12px">${tr(
+      '改宽度时两侧墙体跟着伸缩；类型可在窗 / 门 / 推拉门之间转换。删除后墙上的缺口需手动补墙或撤销。',
+      'Neighbouring walls follow width changes; type can switch between window, door and sliding door. Deleting leaves a gap — undo to restore.')}</section>`;
+}
+function bindOpenPanel(){
+  $('#oKind').onchange = e => setOpenKind(e.target.value);
+  $('#oW').onchange = e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) setOpenWidth(v); };
+  if ($('#oFlip')) $('#oFlip').onclick = flipDoor;
+  $('#oDel').onclick = removeOpening;
+  $('#oBack').onclick = () => { ui.sel = null; renderSel(); renderPanel(); };
+}
+
 function renderEdit(){
   const g = $('#gEdit'); if (!g) return;
   const p = ui.pprev;
@@ -1761,7 +1953,7 @@ function endDrag(cancel){
 svg.addEventListener('pointerdown', e => {
   if (e.button === 1 || e.button === 2) return;
   closeDrawers(); $('details.menu').open = false;
-  if (ui.planEdit && ui.ptool !== 'select'){ planDown(e); return; }
+  if (ui.planEdit){ planDown(e); return; }
   if (e.pointerType !== 'mouse'){
     touches.set(e.pointerId, {x:e.clientX, y:e.clientY});
     svg.setPointerCapture(e.pointerId);
@@ -1841,7 +2033,14 @@ svg.addEventListener('pointermove', e => {
     const mx = ax + nw/2, my = ay + nd/2;
     f.cx += mx*c - my*s; f.cy += mx*s + my*c; f.w = nw; f.d = nd;
   }
-  renderFurn(); renderSel(); renderGuides();
+  if (drag.kind === 'move'){
+    // 拖动时只挪这一个节点，松手（endDrag → renderAll）再整体重绘，46 件家具也不会掉帧
+    const el = svg.querySelector(`[data-fid="${f.id}"]`);
+    if (el) el.setAttribute('transform', `translate(${f.cx} ${f.cy}) rotate(${f.rot})`);
+    renderSel(); renderGuides();
+  } else {
+    renderFurn(); renderSel(); renderGuides();
+  }
 });
 
 function onPointerEnd(e){
@@ -1884,7 +2083,14 @@ document.addEventListener('keydown', e => {
   else if (k === 'f') fitView();
   else if (k === 'r') rotateSel(e.shiftKey ? -90 : 90);
   else if (k === 'delete' || k === 'backspace'){ e.preventDefault(); deleteSel(); }
-  else if (k === 'escape'){ if (ui.mA){ ui.mA = null; renderMeasure(); } else { if (ui.tool !== 'select') setTool('select'); select(null); } }
+  else if (k === 'escape'){
+    if (ui.planEdit){
+      if (ui.pdrag){ ui.pdrag = null; ui.pstart = null; ui.pprev = null; renderEdit(); }
+      else setPlanEdit(false);
+      return;
+    }
+    if (ui.mA){ ui.mA = null; renderMeasure(); } else { if (ui.tool !== 'select') setTool('select'); select(null); }
+  }
   else if (k.startsWith('arrow') && ui.sel?.kind === 'furn'){
     e.preventDefault(); const st = e.shiftKey ? 100 : 10;
     mutate(() => { const f = getF(ui.sel.id); if (k==='arrowleft') f.cx -= st; if (k==='arrowright') f.cx += st; if (k==='arrowup') f.cy -= st; if (k==='arrowdown') f.cy += st; });
@@ -2071,6 +2277,38 @@ $('#planModal').onclick = e => { if (e.target.id === 'planModal') closePlans(); 
 $('#exportPng').onclick = exportPNG;
 $('#exportJson').onclick = () => download(tr('户型装修方案', 'floor-plan-design') + '.json', new Blob([JSON.stringify(state, null, 2)], {type:'application/json'}));
 $('#importJson').onclick = () => $('#fileIn').click();
+// 方案包：把所有方案连同内容导出成一个文件，换浏览器 / 清缓存前可留一份备份
+$('#exportAll').onclick = () => {
+  save(true);
+  const data = {app:'floorplan-3d', kind:'plans', version:1, exportedAt:new Date().toISOString(),
+    current:planStore.current,
+    plans:planStore.list.map(p => ({id:p.id, name:p.name, updatedAt:p.updatedAt, state:planStates[p.id]}))};
+  download(tr('户型方案包', 'floor-plan-bundle') + '.json', new Blob([JSON.stringify(data)], {type:'application/json'}));
+};
+$('#importAll').onclick = () => $('#fileAll').click();
+$('#fileAll').onchange = e => {
+  const file = e.target.files[0]; if (!file) return;
+  file.text().then(txt => {
+    try {
+      const raw = JSON.parse(txt);
+      const list = Array.isArray(raw?.plans) ? raw.plans : null;
+      if (!list || !list.length) throw new Error('shape');
+      save(true);
+      let n = 0;
+      list.forEach(item => {
+        if (!item || !item.state) return;
+        const id = 'p' + Date.now().toString(36) + n;
+        planStates[id] = fixState(item.state);
+        planStore.list.push({id, name:String(item.name || tr('导入方案', 'Imported')).slice(0, 30), updatedAt:Date.now()});
+        n++;
+      });
+      if (!n) throw new Error('empty');
+      persistAll(); renderPlans();
+      toast(tr(`已导入 ${n} 个方案`, `Imported ${n} plans`));
+    } catch(err){ toast(tr('文件格式不正确，请选择本工具导出的方案包', 'Invalid file — pick a plan bundle exported by this tool')); }
+  });
+  e.target.value = '';
+};
 $('#fileIn').onchange = e => {
   const file = e.target.files[0]; if (!file) return;
   file.text().then(txt => {
