@@ -1,3 +1,7 @@
+# 开发用：挂载工作区文件，改完刷新浏览器即可，不必重建镜像
+# 独立的项目名，避免与生产 compose 共享项目而被 --remove-orphans 误删
+name: floorplan-3d-dev
+
 services:
   floorplan-3d-dev:
     image: nginx:alpine

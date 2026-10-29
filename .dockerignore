@@ -1,9 +1,14 @@
+# 构建上下文只需要 index.html + nginx-default.conf
 .git
 .gitignore
+.workbuddy
 README.md
 README.en.md
 LICENSE
+CHANGELOG.md
+docs
 *.md
 docker-compose.yml
+docker-compose.dev.yml
 Dockerfile
 .dockerignore
