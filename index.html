@@ -2529,7 +2529,7 @@ function init(){
   orbit.enableDamping = true; orbit.maxPolarAngle = Math.PI*.495; orbit.minDistance = 1.5; orbit.maxDistance = 45;
   walkCtl = new PointerLockControls(camera, document.body);
   walkCtl.addEventListener('lock', () => { $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'block'; });
-  walkCtl.addEventListener('unlock', () => { if (opt.mode === 'walk'){ $('#walkOverlay').style.display = 'flex'; $('#cross').style.display = 'none'; } });
+  walkCtl.addEventListener('unlock', () => { clearKeys(); if (opt.mode === 'walk'){ $('#walkOverlay').style.display = 'flex'; $('#cross').style.display = 'none'; } });
 
   hemi = new THREE.HemisphereLight(0xfff8ee, 0xb9a88f, 1.1);
   sun = new THREE.DirectionalLight(0xfff1dd, 2.6);
@@ -3314,7 +3314,7 @@ function buildArch(){
     const leaf = box(L, dh, .04, mat(d.entry ? '#6b4f3a' : '#efe6d8', {roughness:.5}), L/2);
     const knob = new THREE.Mesh(new THREE.SphereGeometry(.03, 12, 8), metal()); knob.position.set(L - .07, Math.min(1, dh - .05), 0); knob.scale.z = 2.2;
     pivot.add(leaf, knob);
-    const ang = v => Math.atan2(-v[1], v[0]), door = {pivot, a0:ang(d.c), a1:ang(d.o), open:true};
+    const ang = v => Math.atan2(-v[1], v[0]), door = {pivot, a0:ang(d.c), a1:ang(d.o), open:true, len:L};
     if (door.a1 - door.a0 > Math.PI) door.a1 -= Math.PI*2; if (door.a0 - door.a1 > Math.PI) door.a1 += Math.PI*2;
     door.cur = door.a1; pivot.rotation.y = door.cur; leaf.userData.door = knob.userData.door = door;
     doors.push(door); archUp.add(pivot);
@@ -3448,7 +3448,9 @@ async function enter(){
   stage.classList.remove('animating');
 }
 async function exit(){
+  clearKeys();
   if (opt.mode === 'walk'){ walkCtl.unlock(); stopTouchWalk(); $('#hint3d').textContent = HINT_ORBIT; $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
+    if (cutBeforeWalk !== null){ opt.cut = cutBeforeWalk; cutBeforeWalk = null; syncCutBtns(); }
     const dir = new THREE.Vector3(); camera.getWorldDirection(dir); orbit.target.copy(camera.position).addScaledVector(dir, 3).setY(0); opt.mode = 'orbit'; syncModeBtns(); }
   fly = null; orbit.enabled = false; showLabels(false); stage.classList.add('animating');
   const A = curPose(), B = planPose();
@@ -3517,8 +3519,35 @@ const HINT_ORBIT = () => COARSE ? tr('单指旋转 · 双指缩放 / 平移 · �
 const HINT_TOUCHWALK = () => tr('左下摇杆移动 · 拖动画面转向 · 点门开关', 'Joystick moves · drag to look · tap doors to open');
 const HINT_WALK = () => tr('WASD 移动 · 鼠标转向 · Shift 快走 · E 开关门 · Esc 暂停', 'WASD moves · mouse looks · Shift runs · E opens doors · Esc pauses');
 function syncHint3d(){ $('#hint3d').textContent = opt.mode === 'orbit' ? HINT_ORBIT() : touchWalk ? HINT_TOUCHWALK() : HINT_WALK(); }
-let touchWalk = false;
+let touchWalk = false, cutBeforeWalk = null;
 const joy = {x:0, y:0, id:null}, eul = new THREE.Euler(0, 0, 0, 'YXZ');
+const walkVel = new THREE.Vector3();
+// 按键状态是全局累积的：按住 W 时按 Esc / 切窗口，keyup 可能永远收不到，
+// 下一次进漫游就会「自己一直往前走」。切模式、失焦、解锁时都清一次。
+function clearKeys(){ for (const k in keys) delete keys[k]; walkVel.set(0, 0, 0); }
+// 出生点跟着户型走：优先站在入户门外，其次最大房间中心，最后退回户型包围盒中心
+function walkSpawn(){
+  const cand = [];
+  const d = DOORS.find(o => o.entry) || DOORS[0];
+  if (d){
+    const [x0, y0, x1, y1] = d.rect, horiz = (x1 - x0) >= (y1 - y0);
+    const cx = (x0 + x1)/2, cy = (y0 + y1)/2;
+    // d.o 是门朝房间的开向，门外就是它的反方向
+    const ox = horiz ? 0 : (Math.sign(d.o[0]) || 1), oy = horiz ? (Math.sign(d.o[1]) || 1) : 0;
+    [1, 1.6, 2.4, -1, -1.8].forEach(k =>
+      cand.push({x:cx - ox*1000*k, y:cy - oy*1000*k, lx:cx + ox*1200, ly:cy + oy*1200}));
+  }
+  const rooms = ROOMS.filter(r => r.counted !== false);
+  if (rooms.length){
+    const r = rooms.slice().sort((a, b) => area(b.poly) - area(a.poly))[0];
+    const xs = r.poly.map(p => p[0]), ys = r.poly.map(p => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs))/2, cy = (Math.min(...ys) + Math.max(...ys))/2;
+    cand.push({x:cx, y:cy, lx:cx + 1000, ly:cy});
+  }
+  const b = planBounds();
+  cand.push({x:b.x + b.w/2, y:b.y + b.h/2, lx:b.x + b.w/2 + 1000, ly:b.y + b.h/2});
+  return cand.find(q => !blocked(wx(q.x), wz(q.y))) || cand[cand.length - 1];
+}
 function lookBy(dx, dy){
   eul.setFromQuaternion(camera.quaternion);
   eul.y += dx * .005; eul.x = THREE.MathUtils.clamp(eul.x + dy * .005, -1.35, 1.35);
@@ -3548,17 +3577,23 @@ function bindJoystick(){
 }
 function setMode(m){
   if (anim) return;
-  opt.mode = m; syncModeBtns();
+  if (m === 'walk' && !WALLS.length && !ROOMS.length)
+    return toast(tr('当前户型还是空的，先在「户型」里画墙再漫游', 'This plan is empty — draw a wall before walking'));
+  opt.mode = m; syncModeBtns(); clearKeys();
   if (m === 'walk'){
     window.select(null);
+    cutBeforeWalk = opt.cut;                       // 记下鸟瞰时的剖切档位，退出时还原
     if (opt.cut < H){ opt.cut = H; syncCutBtns(); sync(); }
     orbit.enabled = false; fly = null;
-    camera.position.set(wx(4200), 1.6, wz(8755)); camera.lookAt(wx(7000), 1.5, wz(8755));   // 入户门外
+    const sp = walkSpawn();
+    camera.position.set(wx(sp.x), 1.6, wz(sp.y)); camera.lookAt(wx(sp.lx), 1.6, wz(sp.ly));   // 平视，朝屋里
     $('#walkOverlay').style.display = 'flex';
     syncHint3d();
   } else {
     walkCtl.unlock(); stopTouchWalk(); orbit.enabled = true;
     $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
+    if (cutBeforeWalk !== null && cutBeforeWalk !== opt.cut){ opt.cut = cutBeforeWalk; syncCutBtns(); sync(); }
+    cutBeforeWalk = null;
     syncHint3d();
     orbit.target.set(0, 0, 0); flyTo(isoWhole());
   }
@@ -3568,7 +3603,8 @@ function setMode(m){
 function blocked(x, z, r = .22){
   for (const [x0, z0, x1, z1] of colliders) if (x > x0 - r && x < x1 + r && z > z0 - r && z < z1 + r) return true;
   for (const d of doors){
-    const a = d.pivot.rotation.y, px = d.pivot.position.x, pz = d.pivot.position.z, ex = px + Math.cos(a)*.9, ez = pz - Math.sin(a)*.9;
+    const a = d.pivot.rotation.y, L = d.len || .9, px = d.pivot.position.x, pz = d.pivot.position.z,
+          ex = px + Math.cos(a)*L, ez = pz - Math.sin(a)*L;
     const t = clamp01(((x-px)*(ex-px) + (z-pz)*(ez-pz)) / ((ex-px)**2 + (ez-pz)**2));
     if (Math.hypot(x - (px + t*(ex-px)), z - (pz + t*(ez-pz))) < r*.8) return true;
   }
@@ -3576,25 +3612,32 @@ function blocked(x, z, r = .22){
 }
 function stepWalk(dt){
   if (!walkCtl.isLocked && !touchWalk) return;
-  const sp = (keys.ShiftLeft || keys.ShiftRight ? 2.6 : 1.4) * dt, fwd = new THREE.Vector3();
+  const sp = keys.ShiftLeft || keys.ShiftRight ? 2.6 : 1.4, fwd = new THREE.Vector3();
   camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
   const right = new THREE.Vector3(-fwd.z, 0, fwd.x), mv = new THREE.Vector3();
   if (keys.KeyW || keys.ArrowUp) mv.add(fwd); if (keys.KeyS || keys.ArrowDown) mv.sub(fwd);
   if (keys.KeyD || keys.ArrowRight) mv.add(right); if (keys.KeyA || keys.ArrowLeft) mv.sub(right);
   if (touchWalk){ mv.addScaledVector(fwd, -joy.y).addScaledVector(right, joy.x); }
   const mag = Math.min(1, mv.length());        // 摇杆推得越远走得越快
-  if (mag < .05) return;
-  mv.normalize().multiplyScalar(sp * mag);
-  const p = camera.position;
-  if (!blocked(p.x + mv.x, p.z)) p.x += mv.x;
-  if (!blocked(p.x, p.z + mv.z)) p.z += mv.z;
+  if (mag >= .05) mv.normalize().multiplyScalar(sp * mag); else mv.set(0, 0, 0);
+  // 速度做指数平滑：起步与收步不再瞬移到满速，走起来有惯性而不是「贴地滑动」
+  const k = 1 - Math.exp(-dt*14);
+  walkVel.x += (mv.x - walkVel.x)*k; walkVel.z += (mv.z - walkVel.z)*k;
+  if (Math.abs(walkVel.x) < 1e-4) walkVel.x = 0;
+  if (Math.abs(walkVel.z) < 1e-4) walkVel.z = 0;
+  if (!walkVel.x && !walkVel.z) return;
+  const p = camera.position, dx = walkVel.x*dt, dz = walkVel.z*dt;
+  // 分轴判定即可沿墙滑行；撞上的那一轴把速度清零，避免持续顶着墙抖动
+  if (!blocked(p.x + dx, p.z)) p.x += dx; else walkVel.x = 0;
+  if (!blocked(p.x, p.z + dz)) p.z += dz; else walkVel.z = 0;
 }
 addEventListener('keydown', e => {
-  if (!active || e.target.matches('input,select,textarea')) return;
+  if (!active || (e.target instanceof Element && e.target.matches('input,select,textarea'))) return;
   keys[e.code] = true;
   if (opt.mode === 'walk' && e.code === 'KeyE'){ const h = pick(); if (h?.door && h.dist < 2.5) h.door.open = !h.door.open; }
 });
 addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('blur', () => clearKeys());     // 切走窗口时按键收不到 keyup，主动清一次
 
 /* ======================= 工具栏 ======================= */
 function syncModeBtns(){ document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === opt.mode)); }
