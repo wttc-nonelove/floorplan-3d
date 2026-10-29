@@ -967,7 +967,9 @@ function buildDefs(){
     <pattern id="m-carpet" patternUnits="userSpaceOnUse" width="120" height="120">
       <rect width="120" height="120" fill="#c9c3d3"/><circle cx="30" cy="30" r="8" fill="#bab3c6"/><circle cx="90" cy="90" r="8" fill="#bab3c6"/></pattern>
     <pattern id="grid" patternUnits="userSpaceOnUse" width="1000" height="1000">
-      <path d="M500 0V1000M0 500H1000" stroke="#e5dfd3" stroke-width="8"/><path d="M0 0V1000M0 0H1000" stroke="#d8d0c1" stroke-width="14"/></pattern>`;
+      <path d="M500 0V1000M0 500H1000" stroke="#e5dfd3" stroke-width="8"/><path d="M0 0V1000M0 0H1000" stroke="#d8d0c1" stroke-width="14"/></pattern>
+    <marker id="arrEntry" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#b5653a"/></marker>`;
 }
 
 /* ======================= 家具图例 ======================= */
@@ -1136,9 +1138,17 @@ function renderOpenings(){
     if (v){ const L = y1-y0, m = (x0+x1)/2; s += `<rect data-slide="${i}" x="${m-45}" y="${y0}" width="40" height="${L*.55}" fill="#fff" ${DS}/><rect data-slide="${i}" x="${m+5}" y="${y1-L*.55}" width="40" height="${L*.55}" fill="#fff" ${DS}/>`; }
     else { const L = x1-x0, m = (y0+y1)/2; s += `<rect data-slide="${i}" x="${x0}" y="${m-45}" width="${L*.55}" height="40" fill="#fff" ${DS}/><rect data-slide="${i}" x="${x1-L*.55}" y="${m+5}" width="${L*.55}" height="40" fill="#fff" ${DS}/>`; }
   });
-  // 入户标识只对默认户型有意义，自定义户型不再画
-  if (!state.plan.custom) s += `<path pointer-events="none" d="M3350 8755H4350M4150 8600L4400 8755L4150 8910" fill="none" stroke="#b5653a" stroke-width="2" vector-effect="non-scaling-stroke"/>
-        <text pointer-events="none" x="3380" y="8600" font-size="200" fill="#b5653a">${tr('入户','Entry')}</text>`;
+  // 入户标识：跟着「设为入户门」的那扇门走，默认与自定义户型都生效
+  const entry = DOORS.find(d => d.entry);
+  if (entry){
+    const [x0, y0, x1, y1] = entry.rect, horiz = (x1 - x0) >= (y1 - y0);
+    const cx = (x0 + x1)/2, cy = (y0 + y1)/2;
+    // 门朝 o 方向开，人站在它的反方向（门外）
+    const ox = horiz ? 0 : (Math.sign(entry.o[0]) || 1), oy = horiz ? (Math.sign(entry.o[1]) || 1) : 0;
+    const tx = cx - ox*950, ty = cy - oy*950, lx = cx - ox*620, ly = cy - oy*620;
+    s += `<line pointer-events="none" x1="${tx}" y1="${ty}" x2="${cx}" y2="${cy}" stroke="#b5653a" stroke-width="5" vector-effect="non-scaling-stroke" marker-end="url(#arrEntry)"/>
+          <text pointer-events="none" x="${lx}" y="${ly - 70}" font-size="200" text-anchor="middle" fill="#b5653a" font-weight="600">${tr('入户','Entry')}</text>`;
+  }
   $('#gOpen').innerHTML = s;
 }
 
@@ -1999,6 +2009,9 @@ function flipDoor(){
   if (ui.sel?.kind !== 'open' || ui.sel.type !== 'door') return;
   mutate(() => { const d = state.plan.doors[ui.sel.index]; if (d) d.o = [-d.o[0], -d.o[1]]; });
 }
+function setEntry(i, on){
+  mutate(() => { state.plan.doors.forEach((d, k) => { d.entry = (k === i) && on; }); });
+}
 function removeOpening(){
   if (ui.sel?.kind !== 'open') return;
   const {type, index} = ui.sel;
@@ -2026,6 +2039,7 @@ function openPanel(){
     </div>
     <div class="actions">
       ${type === 'door' ? `<button class="btn" id="oFlip">${tr('翻转开向','Flip swing')}</button>` : ''}
+      ${type === 'door' ? `<button class="btn${o.door && o.door.entry ? ' on' : ''}" id="oEntry">${tr(o.door && o.door.entry ? '取消入户门' : '设为入户门', o.door && o.door.entry ? 'Unset entry' : 'Set as entry')}</button>` : ''}
       <button class="btn danger" id="oDel">${tr('删除洞口','Delete')}</button>
       <button class="btn" id="oBack">${tr('← 返回','← Back')}</button>
     </div></section>
@@ -2037,6 +2051,7 @@ function bindOpenPanel(){
   $('#oKind').onchange = e => setOpenKind(e.target.value);
   $('#oW').onchange = e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) setOpenWidth(v); };
   if ($('#oFlip')) $('#oFlip').onclick = flipDoor;
+  if ($('#oEntry')) $('#oEntry').onclick = () => { const i = ui.sel.index, d = state.plan.doors[i]; setEntry(i, !(d && d.entry)); };
   $('#oDel').onclick = removeOpening;
   $('#oBack').onclick = () => { ui.sel = null; renderSel(); renderPanel(); };
 }
@@ -3893,7 +3908,6 @@ function loop(){
 function shot(){ const a = document.createElement('a'); a.download = tr('户型装修方案', 'floor-plan-design') + '-3D.png'; a.href = renderer.domElement.toDataURL('image/png'); a.click(); }
 
 function relang(){ syncWalkTexts(); if (inited) buildLabels(); }
-
 window.View3D = {enter, exit, relang, sync:() => sync(), shot, groundAt, flyToRoom:id => active && !anim && flyToRoom(id), walking:() => active && opt.mode === 'walk'};
 </script>
 </body>
