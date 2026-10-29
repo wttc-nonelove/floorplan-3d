@@ -7,9 +7,11 @@
 | 仓库 | `https://github.com/wttc-nonelove/floorplan-3d` |
 | 分支 | `Optimize`（跟踪 `origin/Optimize`，不合并 `master`） |
 | 基线 | `730ec09`（2026-10-02，上游 master） |
-| 提交数 | 18（1 chore + 3 feat + 5 fix + 1 build + 8 docs） |
-| 净变化 | 9 个文件，+1802 / −88（截至 `25c3aeb`） |
+| 提交数 | 19（1 chore + 3 feat + 5 fix + 1 build + 9 docs，统计到 `bb3953c`） |
+| 净变化 | 9 个文件，+1802 / −88（截至 `25c3aeb`，最后一个代码提交） |
 | 代码规模 | `index.html` 2674 → 3744 行，184 KB → 244 KB |
+
+> 净变化与代码规模以**最后一个代码提交**为准：之后的文档提交只改日志、不动代码，因此这两个数字不会随日志更新而漂移。
 
 ## 一览
 
@@ -33,6 +35,7 @@
 | `8094f36` | 2026-10-29 14:41 | fix | 漫游模式的键位残留、出生点写死与门碰撞 | 1 文件，+56 / −13 |
 | `f2a11cd` | 2026-10-29 14:44 | docs | 记录漫游模式修复 | 2 文件，+84 / −8 |
 | `25c3aeb` | 2026-10-29 15:03 | fix | 推拉门碰撞与交互、门交互范围、Esc 无法退出漫游 | 1 文件，+59 / −13 |
+| `bb3953c` | 2026-10-29 15:04 | docs | 记录推拉门、交互范围与 Esc 退出修复 | 2 文件，+74 / −8 |
 
 > 各提交的增删行是独立统计；首尾对比的净变化会略小，因为后一次提交重写了前一次新增的部分行。
 
@@ -267,6 +270,7 @@ docker rm -f floorplan-3d && docker compose up -d --build
 | `3c31187` | 记录平开门难以选中的根因（命中区只有 40mm 门扇）与修复 |
 | `bf0b59c` | 记录镜像重构、部署层改动与重建验证结果 |
 | `f2a11cd` | 记录漫游修复的取证方式、两个必踩问题与验证数据 |
+| `bb3953c` | 记录推拉门的三个缺口、交互判定方式的改变、Esc 退不出的设计缺口 |
 
 ---
 
@@ -301,6 +305,27 @@ curl -sS http://localhost:8080/ | md5sum                        # 实际响应
 curl -sSI http://localhost:8080/ | grep -i cache-control        # 应为 no-cache
 curl -sS http://localhost:8080/healthz                          # 应为 ok
 ```
+
+## 交付核对
+
+每次改完代码都会重建生产镜像并核对，记录如下（最近一次 2026-10-29 15:12）：
+
+| 项 | 值 |
+| --- | --- |
+| 镜像 | `floorplan-3d:latest`（`572ef87d75d7`，93.1 MB） |
+| 容器 | `floorplan-3d`，8080 → 80，`Up (healthy)` |
+| 内容一致 | 工作区 / 容器内 / HTTP 响应三方 md5 均为 `e211bf0d…` |
+| 健康端点 | `/healthz` → `200 ok` |
+| 缓存策略 | `Cache-Control: no-cache`（入口）、gzip 生效 |
+| 远程分支 | `origin/Optimize` 与本地一致，`master` 仍为 `730ec09` |
+
+```bash
+docker rm -f floorplan-3d && docker compose up -d --build
+md5sum index.html                                                   # 本地
+MSYS_NO_PATHCONV=1 docker exec floorplan-3d md5sum /usr/share/nginx/html/index.html
+curl -sS http://localhost:8080/ | md5sum                             # 实际响应
+```
+
 
 ## 待办
 
