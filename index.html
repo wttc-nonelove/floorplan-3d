@@ -2507,7 +2507,7 @@ let inited = false, active = false, raf = 0, anim = null, fly = null;
 let renderer, labelRenderer, scene, camera, orbit, walkCtl, hemi, sun, ground, glassMat, wallMat, capMat, frameMat;
 let archFloor, archUp, furnG, labelG, lampG, colliders = [], selKey = null, selHelper = null;
 let sigArch = '', sigFurn = '', sigLabels = '', grow = 1, furnGrow = 1;
-const doors = [], keys = {};
+const doors = [], slides = [], keys = {};
 
 /* ======================= 初始化 ======================= */
 function init(){
@@ -2529,7 +2529,7 @@ function init(){
   orbit.enableDamping = true; orbit.maxPolarAngle = Math.PI*.495; orbit.minDistance = 1.5; orbit.maxDistance = 45;
   walkCtl = new PointerLockControls(camera, document.body);
   walkCtl.addEventListener('lock', () => { $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'block'; });
-  walkCtl.addEventListener('unlock', () => { clearKeys(); if (opt.mode === 'walk'){ $('#walkOverlay').style.display = 'flex'; $('#cross').style.display = 'none'; } });
+  walkCtl.addEventListener('unlock', () => { clearKeys(); if (opt.mode === 'walk' && !touchWalk) setMode('orbit'); });
 
   hemi = new THREE.HemisphereLight(0xfff8ee, 0xb9a88f, 1.1);
   sun = new THREE.DirectionalLight(0xfff1dd, 2.6);
@@ -2587,12 +2587,13 @@ function init(){
     const tap = downAt && Math.hypot(e.clientX-downAt[0], e.clientY-downAt[1]) <= TAP;
     if (look?.id === e.pointerId){
       look = null;
-      if (tap){ const h = pick(e); if (h?.door && h.dist < 3.5) h.door.open = !h.door.open; }   // 漫游时点门开关
+      if (tap){ const o = targetOpening(4.2); if (o) o.open = !o.open; }   // 漫游时点门开关
       return;
     }
     if (anim || opt.mode !== 'orbit' || !tap) return;
     const h = pick(e);
     if (h?.door) h.door.open = !h.door.open;
+    else if (h?.slide) h.slide.open = !h.slide.open;      // 推拉门在鸟瞰下也能点开
     else if (h?.fid) window.select({kind:'furn', id:h.fid});
     else if (h?.room) window.select({kind:'room', id:h.room});
     else window.select(null);
@@ -3266,7 +3267,7 @@ const edgeMat = new THREE.LineBasicMaterial({color:0x6f675b}), skirtMat = new TH
 function shapeOf(poly, flip){ const s = new THREE.Shape(); poly.forEach(([x, y], i) => s[i ? 'lineTo' : 'moveTo'](wx(x), flip ? wz(y) : -wz(y))); return s; }
 
 function buildArch(){
-  clearGroup(archFloor); clearGroup(archUp); lampG.clear(); doors.length = 0; colliders = [];
+  clearGroup(archFloor); clearGroup(archUp); lampG.clear(); doors.length = 0; slides.length = 0; colliders = [];
   const top = opt.cut;
   ROOMS.forEach(r => {
     const m = floorMat(state.rooms[r.id].mat), bay = r.counted === false;
@@ -3321,12 +3322,20 @@ function buildArch(){
   });
   SLIDES.forEach(({rect:[x0, y0, x1, y1], v}) => {
     const L = M(v ? y1-y0 : x1-x0), ph = Math.min(v ? 2.4 : 2.1, top), pl = L*.55;
+    const leaves = [];
     [[-1, -.02], [1, .02]].forEach(([s, off]) => {
       const c = s < 0 ? -L/2 + pl/2 : L/2 - pl/2, x = v ? wx((x0+x1)/2) + off : wx(x0) + L/2 + c, z = v ? wz(y0) + L/2 + c : wz((y0+y1)/2) + off;
-      const p = new THREE.Mesh(new THREE.BoxGeometry(v ? .02 : pl, ph, v ? pl : .02), glassMat); p.position.set(x, ph/2, z); archUp.add(p);
-      [ph - .03, .03].forEach(y => { const fr = new THREE.Mesh(new THREE.BoxGeometry(v ? .04 : pl, .05, v ? pl : .04), frameMat); fr.position.set(x, y, z); archUp.add(fr); });
-      [-1, 1].forEach(e => { const fr = new THREE.Mesh(new THREE.BoxGeometry(.04, ph, .04), frameMat); fr.position.set(v ? x : x + e*pl/2, ph/2, v ? z + e*pl/2 : z); archUp.add(fr); });
+      const leaf = new THREE.Group();                                    // 每扇单独成组，开合时整扇平移
+      const p = new THREE.Mesh(new THREE.BoxGeometry(v ? .02 : pl, ph, v ? pl : .02), glassMat); p.position.set(x, ph/2, z); leaf.add(p);
+      [ph - .03, .03].forEach(y => { const fr = new THREE.Mesh(new THREE.BoxGeometry(v ? .04 : pl, .05, v ? pl : .04), frameMat); fr.position.set(x, y, z); leaf.add(fr); });
+      [-1, 1].forEach(e => { const fr = new THREE.Mesh(new THREE.BoxGeometry(.04, ph, .04), frameMat); fr.position.set(v ? x : x + e*pl/2, ph/2, v ? z + e*pl/2 : z); leaf.add(fr); });
+      leaves.push(leaf); archUp.add(leaf);
     });
+    // 一扇固定、一扇滑到它背后（两扇错层，重叠时不会闪面），开一半
+    const sl = {v, pl, L, rect:[wx(x0), wz(y0), wx(x1), wz(y1)],
+      moving: leaves[1], open:false, cur:0};
+    leaves.forEach(l => l.traverse(o => { o.userData.slide = sl; }));
+    slides.push(sl);
   });
   applyLight(); applyGrow();
 }
@@ -3449,9 +3458,9 @@ async function enter(){
 }
 async function exit(){
   clearKeys();
-  if (opt.mode === 'walk'){ walkCtl.unlock(); stopTouchWalk(); $('#hint3d').textContent = HINT_ORBIT; $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
+  if (opt.mode === 'walk'){ opt.mode = 'orbit'; syncModeBtns(); walkCtl.unlock(); stopTouchWalk(); $('#hint3d').textContent = HINT_ORBIT; $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
     if (cutBeforeWalk !== null){ opt.cut = cutBeforeWalk; cutBeforeWalk = null; syncCutBtns(); }
-    const dir = new THREE.Vector3(); camera.getWorldDirection(dir); orbit.target.copy(camera.position).addScaledVector(dir, 3).setY(0); opt.mode = 'orbit'; syncModeBtns(); }
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir); orbit.target.copy(camera.position).addScaledVector(dir, 3).setY(0); }
   fly = null; orbit.enabled = false; showLabels(false); stage.classList.add('animating');
   const A = curPose(), B = planPose();
   await animate(1300, t => {
@@ -3476,8 +3485,9 @@ function pick(e){
   const hits = ray.intersectObjects([...(opt.furn ? [furnG] : []), archUp, archFloor], true);
   for (const h of hits){
     let o = h.object;
-    if (o.material === glassMat) continue;
     if (o.userData.door) return {door:o.userData.door, dist:h.distance};
+    if (o.userData.slide) return {slide:o.userData.slide, dist:h.distance};   // 玻璃面板也要能点中
+    if (o.material === glassMat) continue;
     if (o.userData.room) return {room:o.userData.room};
     while (o && !o.userData.fid && o !== scene) o = o.parent;
     if (o?.userData.fid) return {fid:o.userData.fid};
@@ -3517,7 +3527,7 @@ function updateSel(){
 const HINT_ORBIT = () => COARSE ? tr('单指旋转 · 双指缩放 / 平移 · 点选家具后可拖动摆放 · 点门开关', '1 finger orbits · 2 fingers zoom / pan · select furniture to drag it · tap doors to open')
   : tr('左键旋转 · 右键平移 · 滚轮缩放 · 选中家具后拖动可摆放 · 点击门开关', 'Left-drag orbits · right-drag pans · scroll zooms · select furniture to drag it · click doors to open');
 const HINT_TOUCHWALK = () => tr('左下摇杆移动 · 拖动画面转向 · 点门开关', 'Joystick moves · drag to look · tap doors to open');
-const HINT_WALK = () => tr('WASD 移动 · 鼠标转向 · Shift 快走 · E 开关门 · Esc 暂停', 'WASD moves · mouse looks · Shift runs · E opens doors · Esc pauses');
+const HINT_WALK = () => tr('WASD 移动 · 鼠标转向 · Shift 快走 · E 开关门 · Esc 退出漫游', 'WASD moves · mouse looks · Shift runs · E opens doors · Esc exits');
 function syncHint3d(){ $('#hint3d').textContent = opt.mode === 'orbit' ? HINT_ORBIT() : touchWalk ? HINT_TOUCHWALK() : HINT_WALK(); }
 let touchWalk = false, cutBeforeWalk = null;
 const joy = {x:0, y:0, id:null}, eul = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -3608,8 +3618,38 @@ function blocked(x, z, r = .22){
     const t = clamp01(((x-px)*(ex-px) + (z-pz)*(ez-pz)) / ((ex-px)**2 + (ez-pz)**2));
     if (Math.hypot(x - (px + t*(ex-px)), z - (pz + t*(ez-pz))) < r*.8) return true;
   }
+  // 推拉门原先完全没进碰撞：站在阳台门前可以直接穿过去。
+  // 关着时整樘挡人，拉开过半才放行。
+  for (const s of slides){
+    if (s.cur > .55) continue;
+    const [x0, z0, x1, z1] = s.rect;
+    if (x > Math.min(x0,x1) - r && x < Math.max(x0,x1) + r && z > Math.min(z0,z1) - r && z < Math.max(z0,z1) + r) return true;
+  }
   return false;
 }
+// 漫游时取「正前方的门」：先按准星射线找，打空再按距离 + 夹角兜一层。
+// 原来只认准星命中的那一个像素，稍微偏一点就变成「没反应」。
+function nearOpening(maxD){
+  const p = camera.position, fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+  let best = null, bd = Infinity;
+  const test = (o, cx, cz) => {
+    const dx = cx - p.x, dz = cz - p.z, dist = Math.hypot(dx, dz);
+    if (dist > maxD || dist < .05) return;
+    if ((dx*fwd.x + dz*fwd.z)/dist < .35) return;          // 背对或侧对的算「看不见」
+    if (dist < bd){ bd = dist; best = o; }
+  };
+  for (const d of doors) test(d, d.pivot.position.x + Math.cos(d.a0)*d.len/2, d.pivot.position.z - Math.sin(d.a0)*d.len/2);
+  for (const o of slides) test(o, (o.rect[0]+o.rect[2])/2, (o.rect[1]+o.rect[3])/2);
+  return best;
+}
+function targetOpening(maxD){
+  const h = pick();
+  if (h?.door && h.dist <= maxD) return h.door;
+  if (h?.slide && h.dist <= maxD) return h.slide;
+  return nearOpening(maxD);
+}
+
 function stepWalk(dt){
   if (!walkCtl.isLocked && !touchWalk) return;
   const sp = keys.ShiftLeft || keys.ShiftRight ? 2.6 : 1.4, fwd = new THREE.Vector3();
@@ -3634,7 +3674,8 @@ function stepWalk(dt){
 addEventListener('keydown', e => {
   if (!active || (e.target instanceof Element && e.target.matches('input,select,textarea'))) return;
   keys[e.code] = true;
-  if (opt.mode === 'walk' && e.code === 'KeyE'){ const h = pick(); if (h?.door && h.dist < 2.5) h.door.open = !h.door.open; }
+  if (opt.mode === 'walk' && e.code === 'Escape'){ setMode('orbit'); return; }   // 浏览器解锁指针不一定会把 Esc 传进来，两条路都兜住
+  if (opt.mode === 'walk' && e.code === 'KeyE'){ const o = targetOpening(3.6); if (o) o.open = !o.open; }
 });
 addEventListener('keyup', e => keys[e.code] = false);
 addEventListener('blur', () => clearKeys());     // 切走窗口时按键收不到 keyup，主动清一次
@@ -3648,7 +3689,7 @@ function syncWalkTexts(){
        tr('点门开关 · 点「退出漫游」回到鸟瞰', 'Tap doors to open · "Exit walk" returns to orbit')]
     : [tr('点击开始，从入户门进入', 'Click to start at the front door'),
        tr('<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> 移动 · 鼠标转向 · <kbd>Shift</kbd> 快走', '<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move · mouse looks · <kbd>Shift</kbd> runs'),
-       tr('<kbd>E</kbd> 开关正前方的门 · <kbd>Esc</kbd> 暂停', '<kbd>E</kbd> opens the door ahead · <kbd>Esc</kbd> pauses')];
+       tr('<kbd>E</kbd> 开关正前方的门（含推拉门） · <kbd>Esc</kbd> 退出漫游', '<kbd>E</kbd> opens the door ahead (incl. sliding) · <kbd>Esc</kbd> exits')];
   t.forEach((h, i) => $('#wo' + (i + 1)).innerHTML = h);
   syncHint3d();
 }
@@ -3683,6 +3724,11 @@ function loop(){
   else if (opt.mode === 'orbit') orbit.update();
   else stepWalk(dt);
   doors.forEach(d => { const tg = d.open ? d.a1 : d.a0; d.cur += (tg - d.cur) * Math.min(1, dt*6); d.pivot.rotation.y = d.cur; });
+  slides.forEach(o => {
+    const tg = o.open ? 1 : 0; o.cur += (tg - o.cur) * Math.min(1, dt*5);
+    const off = -o.pl * o.cur;                       // 滑动扇滑到固定扇背后，露出半幅
+    if (o.v) o.moving.position.z = off; else o.moving.position.x = off;
+  });
   updateSel();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
