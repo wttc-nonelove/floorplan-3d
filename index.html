@@ -250,7 +250,7 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
       <button class="btn chip" id="tgLib" data-en="◧ Library">◧ 家具库</button>
       <button class="btn chip" id="tgPanel" data-en="Properties ◨">属性 ◨</button>
     </div>
-    <div class="brand"><b data-en="3BR 2LR 2BA · Interior Design">三室两厅两卫 · 装修设计</b><span id="subtitle">原始户型 1:60 · 尺寸单位 mm</span></div>
+    <div class="brand"><b id="brandName">户型装修设计</b><span id="subtitle">原始户型 1:60 · 尺寸单位 mm</span></div>
     <div class="grp seg" id="viewSeg" title="切换 2D / 3D (T)" data-en-title="Switch 2D / 3D (T)">
       <span class="pill"></span>
       <button class="btn" data-view="2d" data-en="2D Plan">2D 平面</button>
@@ -1198,6 +1198,9 @@ function renderSel(){
       s += `<text x="${f.cx}" y="${f.cy+hh+24*k}" font-size="${12*k}" text-anchor="middle" fill="#b5653a" font-weight="600" pointer-events="none"
         stroke="#fff" stroke-width="${3*k}" paint-order="stroke">${f.w} × ${f.d}</text>`;
     }
+  } else if (ui.sel?.kind === 'wall'){
+    const w = state.plan.walls[ui.sel.index];
+    if (w) s += `<rect x="${w[0]-20}" y="${w[1]-20}" width="${w[2]-w[0]+40}" height="${w[3]-w[1]+40}" fill="none" stroke="#b5653a" stroke-width="1.5" stroke-dasharray="6 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
   } else if (ui.sel?.kind === 'open'){
     const o = openingAt(ui.sel.type, ui.sel.index);
     if (o){ const [x0, y0, x1, y1] = o.rect;
@@ -1210,12 +1213,18 @@ function renderSel(){
 }
 
 function renderAll(){
-  renderGrid(); renderRooms(); renderFurn(); renderWalls(); renderLabels(); renderDims(); renderMeasure(); renderSel(); renderEdit(); renderPanel(); updateHeader();
+  renderGrid(); renderRooms(); renderFurn(); renderWalls(); renderOpenings(); renderLabels(); renderDims(); renderMeasure(); renderSel(); renderEdit(); renderPanel(); updateHeader();
   window.View3D?.sync();
 }
 
 function updateHeader(){
   const tot = ROOMS.filter(r => r.counted !== false).reduce((a,r) => a + area(r.poly), 0);
+  const brand = $('#brandName');
+  if (brand){
+    const p = currentPlan(), n = ROOMS.filter(r => r.counted !== false).length;
+    brand.textContent = `${p ? p.name : tr('户型装修设计', 'Floor plan')} · ${n} ${tr('个房间', 'rooms')}`;
+    brand.title = tr(`当前方案：${p ? p.name : ''}`, `Current plan: ${p ? p.name : ''}`);
+  }
   $('#subtitle').textContent = tr(`套内使用面积约 ${fmt(tot)} m² · 尺寸单位 mm · 原图比例 1:60`, `Net floor area ≈ ${fmt(tot)} m² · Units: mm · Original scale 1:60`);
   $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length;
   $('#undo').style.opacity = undoStack.length ? 1 : .4; $('#redo').style.opacity = redoStack.length ? 1 : .4;
@@ -1227,6 +1236,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 function renderPanel(){
   renderFab();
   const p = $('#panel');
+  if (ui.planEdit && ui.sel?.kind === 'wall'){ p.innerHTML = wallPanel(); bindWallPanel(); return; }
   if (ui.planEdit && ui.sel?.kind === 'open'){ p.innerHTML = openPanel(); bindOpenPanel(); return; }
   if (ui.planEdit){ p.innerHTML = planPanel(); bindPlanPanel(); return; }
   if (ui.sel?.kind === 'furn'){ const f = getF(ui.sel.id); if (f){ p.innerHTML = furnPanel(f); bindFurnPanel(f); return; } }
@@ -1552,7 +1562,7 @@ function snapPoint(p, shift){
 /* ======================= 户型编辑（墙体 / 门窗 / 房间） ======================= */
 const planOpt = {thick:240, type:'n', open:'win', openW:1500};
 const PTIPS = () => ({
-  select: tr('点击窗或门可改类型 / 宽度 / 门向，点空白处取消选择', 'Click a window or door to edit type, width or swing'),
+  select: tr('点击墙体可拖动移动或改厚度 / 类型，点击门窗可改类型与宽度', 'Click a wall to drag or edit it; click an opening to edit type and width'),
   wall: tr('在平面上拖动绘制墙体 · 自动吸附已有墙的边与中线 · Esc / 点「完成」退出', 'Drag to draw a wall · snaps to existing wall edges · Esc to exit'),
   open: tr('点击墙体开洞，洞口类型与宽度在右侧设置', 'Click a wall to insert an opening — type and width are set on the right'),
   room: tr('拖出矩形定义房间，房间可改名、换地面材料', 'Drag a rectangle to define a room'),
@@ -1625,6 +1635,111 @@ function doorSign(rect){
   const a = !!roomAt(p1), b = !!roomAt(p2);
   return a && !b ? 1 : (!a && b ? -1 : 1);
 }
+/* ---- 墙体：选择 / 拖动 / 改厚度与类型 ---- */
+// 找出落在这面墙上的门窗，拖动墙体时要一起带走
+function openingsOnWall(w){
+  const [x0, y0, x1, y1] = w;
+  const inside = r => { const cx = (r[0] + r[2])/2, cy = (r[1] + r[3])/2;
+    return cx >= x0 - 1 && cx <= x1 + 1 && cy >= y0 - 1 && cy <= y1 + 1; };
+  const out = [];
+  state.plan.wins.forEach((r, i) => { if (inside(r)) out.push({t:'win', i, r:[r[0], r[1], r[2], r[3]]}); });
+  state.plan.doors.forEach((d, i) => { if (inside(d.rect)) out.push({t:'door', i, r:[...d.rect], h:[...d.h]}); });
+  state.plan.slides.forEach((x, i) => { if (inside(x.rect)) out.push({t:'slide', i, r:[...x.rect]}); });
+  return out;
+}
+function startWallDrag(e, i){
+  const w = state.plan.walls[i]; if (!w) return;
+  ui.pdrag = {kind:'wallmove', id:e.pointerId, i, sx:e.clientX, sy:e.clientY, moved:false,
+    from:toMM(e), orig:[...w], items:openingsOnWall(w), before:snap()};
+  svg.setPointerCapture(e.pointerId);
+}
+function wallDragMove(e){
+  const d = ui.pdrag; if (!d) return;
+  if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < TAP) return;
+  const w = state.plan.walls[d.i]; if (!w) return;
+  d.moved = true;
+  const p = toMM(e);
+  const dx = Math.round((p.x - d.from.x)/10)*10, dy = Math.round((p.y - d.from.y)/10)*10;
+  const o = d.orig;
+  w[0] = o[0] + dx; w[1] = o[1] + dy; w[2] = o[2] + dx; w[3] = o[3] + dy;
+  d.items.forEach(it => {
+    const r = [it.r[0] + dx, it.r[1] + dy, it.r[2] + dx, it.r[3] + dy];
+    if (it.t === 'win'){ const x = state.plan.wins[it.i]; if (x){ x[0] = r[0]; x[1] = r[1]; x[2] = r[2]; x[3] = r[3]; } }
+    else if (it.t === 'door'){ const x = state.plan.doors[it.i]; if (x){ x.rect = r; x.h = [it.h[0] + dx, it.h[1] + dy]; } }
+    else { const x = state.plan.slides[it.i]; if (x) x.rect = r; }
+  });
+  state.plan.custom = true;
+  syncPlan();
+  renderWalls(); renderOpenings(); renderSel(); renderDims();
+}
+function setWallThick(i, t){
+  const w = state.plan.walls[i]; if (!w) return;
+  t = Math.max(60, Math.min(600, Math.round(t)));
+  const horiz = (w[2] - w[0]) >= (w[3] - w[1]), old = [...w], items = openingsOnWall(w);
+  mutate(() => {
+    if (horiz){ const c = (old[1] + old[3])/2; w[1] = Math.round(c - t/2); w[3] = w[1] + t; }
+    else { const c = (old[0] + old[2])/2; w[0] = Math.round(c - t/2); w[2] = w[0] + t; }
+    // 门窗跟着变厚度，否则会在墙面上留下缝
+    items.forEach(it => {
+      const fit = r => { if (horiz){ r[1] = w[1]; r[3] = w[3]; } else { r[0] = w[0]; r[2] = w[2]; } };
+      if (it.t === 'win'){ const x = state.plan.wins[it.i]; if (x) fit(x); }
+      else if (it.t === 'door'){ const x = state.plan.doors[it.i]; if (x) fit(x.rect); }
+      else { const x = state.plan.slides[it.i]; if (x) fit(x.rect); }
+    });
+    state.plan.custom = true; syncPlan();
+  });
+}
+function setWallType(i, t){
+  if (!['b', 'e', 'n', 'low'].includes(t)) return;
+  const w = state.plan.walls[i]; if (!w) return;
+  mutate(() => { w[4] = t; state.plan.custom = true; syncPlan(); });
+}
+function removeWallAt(i){
+  const w = state.plan.walls[i]; if (!w) return;
+  const inside = r => { const cx = (r[0] + r[2])/2, cy = (r[1] + r[3])/2;
+    return cx >= w[0] - 1 && cx <= w[2] + 1 && cy >= w[1] - 1 && cy <= w[3] + 1; };
+  mutate(() => {
+    const pl = state.plan;
+    pl.walls.splice(i, 1);
+    pl.wins = pl.wins.filter(r => !inside(r));
+    pl.doors = pl.doors.filter(d => !inside(d.rect));
+    pl.slides = pl.slides.filter(x => !inside(x.rect));
+    pl.custom = true;
+    state.demolished = [];          // 墙体下标变了
+    syncPlan();
+  });
+  ui.sel = null; renderSel(); renderPanel();
+}
+function wallPanel(){
+  const i = ui.sel.index, w = state.plan.walls[i];
+  if (!w) return planPanel();
+  const horiz = (w[2] - w[0]) >= (w[3] - w[1]);
+  const len = horiz ? w[2] - w[0] : w[3] - w[1], thick = horiz ? w[3] - w[1] : w[2] - w[0];
+  const tn = {b:tr('承重墙','Load-bearing'), e:tr('外墙','Exterior'), n:tr('普通墙','Partition'), low:tr('矮墙','Low wall')}[w[4]] || w[4];
+  const opt = (v, l) => `<option value="${v}" ${w[4] === v ? 'selected' : ''}>${l}</option>`;
+  return `<section><h3>${tr('墙体','Wall')} <small>${tn}</small></h3>
+    <div class="form">
+      <label>${tr('厚度','Thickness')} (mm)<input id="wThick" type="number" min="60" max="600" step="10" value="${Math.round(thick)}"></label>
+      <label>${tr('类型','Type')}<select id="wType">
+        ${opt('n', tr('普通墙','Partition'))}${opt('b', tr('承重墙','Load-bearing'))}
+        ${opt('e', tr('外墙','Exterior'))}${opt('low', tr('矮墙','Low wall'))}</select></label>
+      <label class="full">${tr('长度','Length')} (mm)<input value="${Math.round(len)}" disabled></label>
+    </div>
+    <div class="actions">
+      <button class="btn danger" id="wDel">${tr('删除墙体','Delete')}</button>
+      <button class="btn" id="wBack">${tr('← 返回','← Back')}</button>
+    </div></section>
+    <section class="muted" style="font-size:12px">${tr('在画布上拖动可移动这面墙，墙上的门窗会一起移动。','Drag the wall on the canvas to move it; its openings follow.')}</section>`;
+}
+function bindWallPanel(){
+  const i = ui.sel.index, w = state.plan.walls[i]; if (!w) return;
+  const on = (sel, fn) => { const el = $(sel); if (el) fn(el); };
+  on('#wThick', el => el.onchange = e => setWallThick(i, parseFloat(e.target.value)));
+  on('#wType', el => el.onchange = e => setWallType(i, e.target.value));
+  on('#wDel', el => el.onclick = () => removeWallAt(i));
+  on('#wBack', el => el.onclick = () => { ui.sel = null; renderSel(); renderPanel(); });
+}
+
 function planDown(e){
   const p = toMM(e), t = e.target;
   if (ui.ptool === 'select'){
@@ -1634,7 +1749,16 @@ function planDown(e){
       if (ds.win !== undefined) select({kind:'open', type:'win', index:+ds.win});
       else if (ds.door !== undefined) select({kind:'open', type:'door', index:+ds.door});
       else select({kind:'open', type:'slide', index:+ds.slide});
-    } else select(null);
+      return;
+    }
+    const wEl = t.closest && t.closest('[data-wall]');
+    if (wEl){
+      const i = +wEl.dataset.wall.slice(1);
+      select({kind:'wall', index:i});
+      startWallDrag(e, i);
+      return;
+    }
+    select(null);
     return;
   }
   if (ui.ptool === 'wall' || ui.ptool === 'room'){
@@ -1648,6 +1772,7 @@ function planDown(e){
 }
 function planMove(e){
   const d = ui.pdrag; if (!d) return;
+  if (d.kind === 'wallmove'){ wallDragMove(e); return; }
   if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < TAP) return;
   d.moved = true;
   ui.pprev = {a:ui.pstart, b:snapDraw(toMM(e))};
@@ -1655,6 +1780,11 @@ function planMove(e){
 }
 function planUp(e){
   const d = ui.pdrag; ui.pdrag = null;
+  if (d && d.kind === 'wallmove'){
+    if (e.type === 'pointercancel'){ applyState(JSON.parse(d.before)); renderAll(); }
+    else if (d.moved){ commit(d.before); renderAll(); }
+    ui.pstart = null; ui.pprev = null; return;
+  }
   if (d && d.moved && ui.pprev && e.type !== 'pointercancel') commitDraw(ui.pprev);
   ui.pstart = null; ui.pprev = null; renderEdit();
 }
