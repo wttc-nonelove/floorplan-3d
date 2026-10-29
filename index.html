@@ -1101,10 +1101,12 @@ function renderOpenings(){
     const ox = hx + d.o[0]*L, oy = hy + d.o[1]*L, cx = hx + d.c[0]*L, cy = hy + d.c[1]*L;
     const sweep = d.o[0]*d.c[1] - d.o[1]*d.c[0] > 0 ? 1 : 0;
     const col = d.entry ? '#b5653a' : '#3d3a34';
+    s += `<rect data-door="${i}" x="${d.rect[0]}" y="${d.rect[1]}" width="${d.rect[2]-d.rect[0]}" height="${d.rect[3]-d.rect[1]}" fill="#fff" fill-opacity="0" pointer-events="all"/>`;
     s += `<polygon data-door="${i}" points="${hx},${hy} ${ox},${oy} ${ox+d.c[0]*T},${oy+d.c[1]*T} ${hx+d.c[0]*T},${hy+d.c[1]*T}" fill="#fff" stroke="${col}" stroke-width="${d.entry?1.8:1}" vector-effect="non-scaling-stroke"/>`;
     s += `<path pointer-events="none" d="M${ox} ${oy}A${L} ${L} 0 0 ${sweep} ${cx} ${cy}" fill="none" ${DS} stroke-dasharray="5 3" opacity=".7"/>`;
   });
   SLIDES.forEach(({rect:[x0,y0,x1,y1],v}, i) => {
+    s += `<rect data-slide="${i}" x="${x0}" y="${y0}" width="${x1-x0}" height="${y1-y0}" fill="#fff" fill-opacity="0" pointer-events="all"/>`;
     if (v){ const L = y1-y0, m = (x0+x1)/2; s += `<rect data-slide="${i}" x="${m-45}" y="${y0}" width="40" height="${L*.55}" fill="#fff" ${DS}/><rect data-slide="${i}" x="${m+5}" y="${y1-L*.55}" width="40" height="${L*.55}" fill="#fff" ${DS}/>`; }
     else { const L = x1-x0, m = (y0+y1)/2; s += `<rect data-slide="${i}" x="${x0}" y="${m-45}" width="${L*.55}" height="40" fill="#fff" ${DS}/><rect data-slide="${i}" x="${x1-L*.55}" y="${m+5}" width="${L*.55}" height="40" fill="#fff" ${DS}/>`; }
   });
@@ -1840,6 +1842,9 @@ function addOpening(p){
     state.demolished = [];             // 墙体下标已变
     syncPlan();
   });
+  const nt = planOpt.open === 'door' ? 'door' : planOpt.open === 'slide' ? 'slide' : 'win';
+  const arr = nt === 'win' ? state.plan.wins : nt === 'door' ? state.plan.doors : state.plan.slides;
+  select({kind:'open', type:nt, index:arr.length - 1});     // 插完立即选中，方便接着调宽度 / 翻转开向
   const kind = {win:tr('窗','window'), floor:tr('落地窗','floor window'), bay:tr('飘窗','bay window'), door:tr('门','door'), slide:tr('推拉门','sliding door')}[planOpt.open];
   toast(tr(
     `已插入${kind}${w[4] === 'b' ? '（承重墙开窗需加过梁）' : ''}${hadDem ? '；墙体已重新分段，拆除标记已清除' : ''}`,
