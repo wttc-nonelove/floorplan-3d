@@ -7,8 +7,8 @@
 | 仓库 | `https://github.com/wttc-nonelove/floorplan-3d` |
 | 分支 | `Optimize`（跟踪 `origin/Optimize`，不合并 `master`） |
 | 基线 | `730ec09`（2026-10-02，上游 master） |
-| 提交数 | 10（7 个功能/修复 + 3 个文档） |
-| 净变化 | 9 个文件，+1470 / −63（截至 `84eb680`） |
+| 提交数 | 14（1 chore + 3 feat + 3 fix + 1 build + 6 docs） |
+| 净变化 | 9 个文件，+1516 / −63（截至 `f62a191`） |
 | 代码规模 | `index.html` 2674 → 3655 行，184 KB → 236 KB |
 
 ## 一览
@@ -23,8 +23,12 @@
 | `2929560` | 2026-10-29 00:23 | docs | 更新验证结论：自定义户型 3D 已通过 | 2 文件，+4 / −3 |
 | `6ed0a3b` | 2026-10-29 12:41 | feat | 规则一致性、存储与拖动性能、洞口再编辑 | 1 文件，+275 / −37 |
 | `917eff7` | 2026-10-29 12:42 | docs | 补充第三批改动与验证结果 | 2 文件，+49 / −10 |
+| `aba76a1` | 2026-10-29 12:48 | docs | 补全提交日志条目并重排优化日志章节 | 2 文件，+36 / −24 |
 | `73c1573` | 2026-10-29 12:59 | fix | 方案切换残留、墙体不可编辑、顶部信息不跟随方案 | 1 文件，+134 / −4 |
+| `9c8a5e9` | 2026-10-29 13:00 | docs | 记录三处缺陷修复 | 1 文件，+14 / −3 |
 | `84eb680` | 2026-10-29 13:44 | fix | 平开门难以选中，开向无法切换 | 1 文件，+5 |
+| `3c31187` | 2026-10-29 13:44 | docs | 记录平开门选中问题修复 | 1 文件，+12 / −3 |
+| `f62a191` | 2026-10-29 13:49 | build | 重构镜像构建与 nginx 配置 | 4 文件，+46 / −9 |
 
 > 各提交的增删行是独立统计；首尾对比的净变化会略小，因为后一次提交重写了前一次新增的部分行。
 
@@ -135,6 +139,40 @@
 
 ---
 
+## `f62a191` build: 重构镜像构建与 nginx 配置
+
+这轮不动业务代码，只收拾部署层。四件事：
+
+- **健康检查改探 `/healthz`**：原来探 `/`，而首页是 700 KB+ 的单文件，每 30 秒被完整拉一次纯属浪费。新增一个只回 `ok` 的端点，并关掉它的访问日志。
+- **`index.html` 加 `Cache-Control: no-cache`**：这是本次最有实际意义的一条。应用是单文件，没有文件名哈希可做长期缓存——如果被浏览器默认缓存策略留住，发版后用户会一直看到旧版本，且**没有任何征兆**。`no-cache` 允许缓存但每次都回源校验，命中 304 时几乎没有开销。
+- **安全与协商头**：`server_tokens off`（不回显 nginx 版本）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`gzip_vary on`。
+- **构建上下文收敛**：`.dockerignore` 补 `.workbuddy` / `docs` / `CHANGELOG.md` / `docker-compose.dev.yml`。
+
+顺带修了一个隐患：`docker-compose.dev.yml` 没有声明项目名，开发容器与生产容器落在同一个 compose 项目里，`docker compose up -d --remove-orphans` 会把它当孤儿容器删掉。现在声明了 `name: floorplan-3d-dev`，两者互不相干。
+
+镜像没有做多阶段构建——没有编译产物要搬运，多一层只会增加理解成本。基础镜像仍是 `nginx:alpine`，没有收紧到固定小版本：这个项目没有可回归的构建产物，收紧版本的收益不抵维护成本。
+
+### 重建与验证结果
+
+```bash
+docker rm -f floorplan-3d && docker compose up -d --build
+```
+
+| 检查项 | 结果 |
+| --- | --- |
+| 构建 | `floorplan-3d:latest`（`f9355dde9c29`，93.1 MB），耗时约 1 s（基础层命中缓存） |
+| 容器 | `Up (healthy)`，8080 → 80 |
+| 页面哈希 | 容器内 `index.html`、HTTP 响应、工作区文件三者 md5 一致（`04cf68c8…`） |
+| 功能抽查 | `data-door` / `flipDoor` / `setOpenWidth` / `startWallDrag` / `brandName` / `planStates` 全部在服务端产物中命中 |
+| 健康端点 | `/healthz` → `200 ok` |
+| 缓存头 | `Cache-Control: no-cache`、`nosniff`、`SAMEORIGIN` 均生效 |
+| gzip | 241 576 B → 79 834 B（33.0%） |
+| nginx 语法 | `nginx -t` 通过 |
+
+浏览器实测 8080 首屏正常，顶栏显示「方案 1 · 11 个房间」。
+
+---
+
 ## 文档提交
 
 | 提交 | 内容 |
@@ -142,6 +180,9 @@
 | `81ba682` | 建立 `CHANGELOG.md` 与 `docs/optimization-log.md`：前者按提交记录改动，后者记录判断依据与取舍 |
 | `2929560` | 把「自定义户型 3D 未验证」更新为实测通过，并把待办替换成真实遗留项 |
 | `917eff7` | 补充第三批改动、验证清单与已知限制 |
+| `aba76a1` | 补齐遗漏的三条文档提交，表格按时间重排，优化日志章节编号改为连续 |
+| `9c8a5e9` | 记录方案切换残留、墙体不可编辑、顶栏文案三处缺陷的根因与修复 |
+| `3c31187` | 记录平开门难以选中的根因（命中区只有 40mm 门扇）与修复 |
 
 ---
 
@@ -162,9 +203,19 @@
 docker compose -f docker-compose.dev.yml up -d
 # → http://localhost:8081
 
-# 生产（把当前代码打进镜像）
-docker compose up -d --build
+# 生产（把当前代码打进镜像；容器名固定为 floorplan-3d，重建前需先移除旧容器）
+docker rm -f floorplan-3d && docker compose up -d --build
 # → http://localhost:8080
+```
+
+部署后可这样确认镜像里装的确实是当前代码：
+
+```bash
+md5sum index.html                                              # 本地
+docker exec floorplan-3d md5sum /usr/share/nginx/html/index.html   # 容器内（Git Bash 需加 MSYS_NO_PATHCONV=1）
+curl -sS http://localhost:8080/ | md5sum                        # 实际响应
+curl -sSI http://localhost:8080/ | grep -i cache-control        # 应为 no-cache
+curl -sS http://localhost:8080/healthz                          # 应为 ok
 ```
 
 ## 待办
@@ -175,3 +226,4 @@ docker compose up -d --build
 - 窄屏顶栏整理（约 712px 宽时会涨到 5 行）
 - 拖动家具仍可压墙、穿墙；画墙未做重合判定，重叠会在 3D 里 z-fighting
 - 删除洞口后墙上会留缺口，需撤销或手动补墙
+- three.js 仍从 jsDelivr 加载，内网 / 断网环境只有 2D 可用（镜像没有把依赖自托管）
